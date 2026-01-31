@@ -2,21 +2,116 @@
 
 ## プロジェクト概要
 簡易的な村のシミュレーションおよび地形生成のトライアルプロジェクト。
+Landlab ライブラリを使用した地形進化シミュレーション。
+
+## 🎯 成功したパラメータ設定（推奨）
+
+### ベスト設定（500万年シミュレーション）
+
+```python
+from land_evolution import run_land_evolution_simulation, visualize_results
+
+results = run_land_evolution_simulation(
+    nrows=500,          # グリッド行数
+    ncols=500,          # グリッド列数
+    dx=50.0,            # セル解像度 (m) → 25km×25kmの領域
+    uplift_rate=0.001,  # 隆起速度 1mm/yr（活発な造山帯）
+    k_sp=1.0e-5,        # 河川侵食係数（Hatari Labs推奨）
+    k_hs=0.05,          # 斜面拡散係数（標準：滑らかな斜面）
+    dt=5000,            # タイムステップ（5000年）
+    tmax=5000000,       # 総時間（500万年）
+    seed=42,            # 乱数シード
+    use_depression_finder=False,  # 窪地処理OFF（高速化）
+    save_interval=1000000,        # 100万年ごとにスナップショット
+)
+visualize_results(results, output_file='land_evolution_500x500_5M.png')
+```
+
+**結果：**
+- 最終標高: 20.4 - 1180.4 m
+- 総隆起量: 5,000 m
+- 定常状態（隆起≒侵食）に到達
+- 明瞭な河川ネットワーク・分水嶺が形成
+
+### パラメータバリエーション
+
+| 設定名 | K_hs | 結果の特徴                  |
+| ------ | ---- | --------------------------- |
+| 標準   | 0.05 | 滑らかな斜面、自然な見た目  |
+| 急峻   | 0.01 | シャープな稜線、V字谷が顕著 |
 
 ## システム設計
-(今後追記)
+
+### 地形進化の物理モデル
+
+地形進化は以下の3つのプロセスの組み合わせ:
+
+1. **河川侵食 (Stream Power Erosion)**
+   - 公式: `E = K_sp × A^m × S^n`
+   - A: 集水面積、S: 勾配
+   - 河川が谷を削り込む
+
+2. **斜面拡散 (Hillslope Diffusion)**
+   - 公式: `∂z/∂t = K_hs × ∇²z`
+   - 土壌クリープ、風化による斜面の滑らかな変化
+
+3. **地殻隆起 (Tectonic Uplift)**
+   - 公式: `∂z/∂t = U`
+   - 一定速度での地盤上昇
+
+### パラメータガイドライン（Hatari Labs参考）
+
+| パラメータ     | 記号 | 推奨値       | 説明                   |
+| -------------- | ---- | ------------ | ---------------------- |
+| 河川侵食係数   | K_sp | 1.0e-5       | 大きいと侵食が速い     |
+| 集水面積指数   | m_sp | 0.5          | 通常 0.3-0.6           |
+| 勾配指数       | n_sp | 1.0          | 通常 0.7-1.0           |
+| 斜面拡散係数   | K_hs | 0.05 m²/yr   | 大きいと斜面が滑らか   |
+| 隆起速度       | U    | 0.001 m/yr   | 1mm/yr = 活発な隆起域  |
+| タイムステップ | dt   | 5000 yr      | 安定性と速度のバランス |
+| 総時間         | tmax | 5,000,000 yr | 定常状態に達するまで   |
+
+### パラメータの意味と調整指針
+
+- **K_hs（斜面拡散）**: 斜面の滑らかさを制御。大きいと丸みを帯び、小さいと急峻
+- **K_sp（河川侵食）**: 河川の削り込み速度。大きいと深い谷が形成
+- **uplift_rate**: 地盤隆起速度。大きいと高い山、小さいと低い丘陵
+- **tmax**: 長いほど地形が「成熟」。定常状態（100万年以上）で河川ネットワーク明瞭
+
+**重要：K_hs×時間 と 時間延長 は似た効果だが異なる**
+- K_hs大：斜面だけ滑らか、河川や標高への影響小
+- 時間延長：全プロセス（隆起・河川・斜面）が進む
 
 ## 修正履歴
 - 2026/01/31: プロジェクト初期化 (Git init, .gitignore, .venv)
+- 2026/01/31: land_evolution.py 作成（Hatari Labs参考版）
+- 2026/02/01: パラメータ実験完了、500万年シミュレーションで定常状態を確認
+- 2026/02/01: ファイル整理（過去の試行をarchiveフォルダへ移動）
 
 ## タスク管理
 - [x] プロジェクト初期化
-- [ ] 地形生成プロトタイプ作成
+- [x] 地形生成プロトタイプ作成
+- [x] Hatari Labs チュートリアル参考版作成
+- [x] パラメータ実験・最適化 → **500x500, 500万年が最適**
+- [ ] 3D可視化の改善
+- [ ] 実データ（DEM）との連携
+- [ ] ゲーム用地形データへの変換
 
+## 参考資料
+- [Hatari Labs Tutorial](https://hatarilabs.com/ih-en/modeling-land-evolution-at-basin-scale-with-python-and-landlab-tutorial)
+- [Landlab Documentation](https://landlab.readthedocs.io/)
 
+## ファイル構成
 
-
-
-
-https://hatarilabs.com/ih-en/modeling-land-evolution-at-basin-scale-with-python-and-landlab-tutorial
+```
+地形生成トライアル/
+├── land_evolution.py           # 【メイン】地形進化シミュレーション
+├── natural_terrain.py          # パーリンノイズによる初期地形生成
+├── land_evolution_500x500_5M.png  # 最新の成功結果（500万年）
+├── memo.md                     # このファイル
+├── archive/                    # 過去の試行錯誤
+│   ├── trial_images/           # 過去に生成した画像
+│   └── old_scripts/            # 過去の試行スクリプト
+└── ドキュメント/               # プロジェクトドキュメント
+```
 
