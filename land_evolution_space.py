@@ -74,8 +74,13 @@ def resolve_output_path(filename):
     return OUTPUT_DIR / Path(filename).name
 
 
-def generate_coastal_terrain(nrows, ncols, seed=42, amplitude=300.0, land_fraction=0.75):
-    """海岸を含む初期地形を生成"""
+def generate_initial_terrain(
+    nrows,
+    ncols,
+    seed=42,
+    amplitude=300.0,
+):
+    """初期地形を生成（純粋なPerlin地形）"""
     terrain = np.zeros((nrows, ncols))
     
     for octave in range(5):
@@ -88,19 +93,8 @@ def generate_coastal_terrain(nrows, ncols, seed=42, amplitude=300.0, land_fracti
     
     terrain = (terrain - terrain.min()) / (terrain.max() - terrain.min())
     terrain *= amplitude
-    
-    # 海岸に向かう傾斜
-    sea_boundary_row = int(nrows * (1 - land_fraction))
-    for i in range(nrows):
-        if i < sea_boundary_row:
-            depth_factor = (sea_boundary_row - i) / sea_boundary_row
-            terrain[i, :] -= amplitude * 0.3 * depth_factor
-            terrain[i, :] -= 50.0
-        else:
-            distance_from_coast = i - sea_boundary_row
-            terrain[i, :] += distance_from_coast * DX * 0.015
-    
-    return terrain, sea_boundary_row
+
+    return terrain
 
 
 def run_space_simulation(
@@ -120,15 +114,11 @@ def run_space_simulation(
     dt=DT,
     tmax=TMAX,
     seed=42,
-    land_fraction=0.75,
-    beach_rows=5,
     save_interval=50000,
 ):
-    """
-    SPACE モジュールを使った沿岸地形進化シミュレーション
-    """
+    """SPACE モジュールを使った地形進化シミュレーション"""
     print("=" * 60)
-    print("SPACE 沿岸地形進化シミュレーション")
+    print("SPACE 地形進化シミュレーション")
     print("=" * 60)
     print(f"Grid: {nrows} x {ncols}, dx = {dx} m")
     print(f"Domain: {nrows * dx / 1000:.1f} km x {ncols * dx / 1000:.1f} km")
@@ -144,9 +134,7 @@ def run_space_simulation(
     mg = RasterModelGrid(shape=(nrows, ncols), xy_spacing=dx)
     
     # ----- 初期地形 -----
-    terrain_2d, sea_boundary_row = generate_coastal_terrain(
-        nrows, ncols, seed=seed, amplitude=300.0, land_fraction=land_fraction
-    )
+    terrain_2d = generate_initial_terrain(nrows, ncols, seed=seed, amplitude=300.0)
     
     z = mg.add_zeros("topographic__elevation", at="node")
     z += terrain_2d.ravel()
@@ -161,33 +149,14 @@ def run_space_simulation(
         right_is_closed=True,
         top_is_closed=True,
         left_is_closed=True,
-        bottom_is_closed=True,
+        bottom_is_closed=False,
     )
-    
-    # 海側を固定値境界に
-    bottom_nodes = mg.nodes_at_bottom_edge
-    mg.status_at_node[bottom_nodes] = mg.BC_NODE_IS_FIXED_VALUE
+
     sea_level = 0.0
-    z[bottom_nodes] = sea_level
-    
-    # ----- 海浜帯の設定（拡散係数を空間分布化）-----
-    beach_nodes = []
-    for row in range(beach_rows):
-        start_node = row * ncols
-        end_node = start_node + ncols
-        beach_nodes.extend(range(start_node, end_node))
-    beach_nodes = np.array(beach_nodes)
-    
-    # 拡散係数の空間分布
-    k_hs_field = mg.add_ones("linear_diffusivity", at="link", clobber=True) * k_hs
-    for node in beach_nodes:
-        links = mg.links_at_node[node]
-        valid_links = links[links != -1]
-        k_hs_field[valid_links] = 5.0 * k_hs
     
     # ----- コンポーネント初期化 -----
     fa = FlowAccumulator(mg, flow_director='D8')
-    ld = LinearDiffuser(mg, linear_diffusivity=k_hs_field, deposit=False)
+    ld = LinearDiffuser(mg, linear_diffusivity=k_hs, deposit=False)
     
     # SPACE コンポーネント
     space = SpaceLargeScaleEroder(
@@ -217,9 +186,8 @@ def run_space_simulation(
     print(f"\nSimulation starting...")
     
     for ti in t_values:
-        # 1. 地殻隆起（内陸のみ）
-        inland_core = np.setdiff1d(mg.core_nodes, beach_nodes)
-        z[inland_core] += uplift_rate * dt
+        # 1. 地殻隆起
+        z[mg.core_nodes] += uplift_rate * dt
         
         # 2. 斜面拡散
         ld.run_one_step(dt)
@@ -232,9 +200,6 @@ def run_space_simulation(
         
         # 5. SPACE（侵食＋堆積）
         space.run_one_step(dt)
-        
-        # 6. 海面以下を制限
-        z[z < sea_level - 100] = sea_level - 100
         
         total_time += dt
         
@@ -524,7 +489,7 @@ def compare_with_without_deposition():
 # ========================================
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("SPACE Coastal Evolution Simulation")
+    print("SPACE Terrain Evolution Simulation")
     print("="*60 + "\n")
     
     # ---- 基本シミュレーション ----
@@ -542,7 +507,6 @@ if __name__ == "__main__":
         dt=1000,
         tmax=300000,   # 30万年
         seed=42,
-        land_fraction=0.75,
         save_interval=50000,
     )
     

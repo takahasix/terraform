@@ -5,7 +5,7 @@
 Landlab ライブラリを使用した地形進化シミュレーション。
 
 ## 🎯 成功したパラメータ設定（推奨）
-※ `land_evolution.py` は `archive/temp/` に移動しました。SPACEアルゴリズムを使用した `space_coastal.py` を基本とします。
+※ `land_evolution.py` は `archive/temp/` に移動しました。SPACEアルゴリズムを使用した `land_evolution_space.py` を基本とします。
 ### ベスト設定（500万年シミュレーション）
 
 ```python
@@ -44,7 +44,7 @@ visualize_results(results, output_file='land_evolution_500x500_5M.png')
 
 ### 地形進化の物理モデル
 
-地形進化は以下の3つのプロセスの組み合わせ（現在は `archive/temp/land_evolution.py` または `space_coastal.py` で実装されています）:
+地形進化は以下の3つのプロセスの組み合わせ（現在は `archive/temp/land_evolution.py` または `land_evolution_space.py` で実装されています）:
 
 1. **河川侵食 (Stream Power Erosion)**
    - 公式: `E = K_sp × A^m × S^n`
@@ -59,7 +59,7 @@ visualize_results(results, output_file='land_evolution_500x500_5M.png')
    - 公式: `∂z/∂t = U`
    - 一定速度での地盤上昇
 
-### SPACE アルゴリズム (space_coastal.py)
+### SPACE アルゴリズム (land_evolution_space.py)
 
 Landlab の SPACE (Stream Power with Alluvium Conservation and Entrainment) モデルを使用。
 これは `land_evolution.py` で使用されている単純な StreamPowerEroder とは異なり、土砂の「堆積（積もる）」をシミュレートできます。
@@ -148,7 +148,7 @@ results = run_coastal_evolution(
 - **波食崖（wave-cut cliff）**: 海面付近で侵食を強化
 - **沿岸漂砂**: 沿岸流による横方向の砂輸送（ルールベースで近似）
 
-## 🏔️ SPACE モジュール（space_coastal.py）
+## 🏔️ SPACE モジュール（land_evolution_space.py）
 
 ### 概要
 StreamPowerEroder の代わりに **SPACE (Stream Power with Alluvium Conservation and Entrainment)** を使用。
@@ -178,7 +178,7 @@ StreamPowerEroder の代わりに **SPACE (Stream Power with Alluvium Conservati
 ### 使い方
 
 ```python
-from space_coastal import run_space_simulation, visualize_space_results
+from land_evolution_space import run_space_simulation, visualize_space_results
 
 results = run_space_simulation(
     nrows=150, ncols=150, dx=50.0,
@@ -204,6 +204,9 @@ visualize_space_results(results, "space_result.png")
 - 2026/02/01: ファイル整理（過去の試行をarchiveフォルダへ移動)
 - 2026/02/01: **coastal_evolution.py 作成**（海辺・沿岸地形の表現）
 - 2026/02/01: **space_coastal.py 作成**（SPACE モジュールで侵食＋堆積）
+- 2026/02/18: `space_coastal.py` を `land_evolution_space.py` にリネーム
+- 2026/02/18: `land_evolution_space.py` の初期地形で「下部25%の強制標高加工」をデフォルトOFF化（Perlin初期地形を優先）
+- 2026/02/18: `land_evolution_space.py` を簡素化（海専用の固定境界・海浜補正・海面下クランプを削除し、通常SPACE計算へ統一）
 - 2026/02/18: ルート直下の中間生成物を整理（試行スクリプトを archive/old_scripts、確認用画像・CSVを archive/trial_images へ移動）
 - 2026/02/18: ルート直下の実行スクリプト出力を archive/trial_images に固定（画像・CSV の保存先統一）
 
@@ -212,8 +215,8 @@ visualize_space_results(results, "space_result.png")
 - [x] 地形生成プロトタイプ作成
 - [x] Hatari Labs チュートリアル参考版作成
 - [x] パラメータ実験・最適化 → **500x500, 500万年が最適**
-- [x] **沿岸地形シミュレーション実装** → coastal_evolution.py
-- [x] **SPACE モジュールによる堆積表現** → space_coastal.py
+- [x] **沿岸地形シミュレーション実装** → archive/temp/coastal_evolution.py
+- [x] **SPACE モジュールによる堆積表現** → land_evolution_space.py
 - [ ] 3D可視化の改善
 - [ ] 実データ（DEM）との連携
 - [ ] ゲーム用地形データへの変換
@@ -228,13 +231,13 @@ visualize_space_results(results, "space_result.png")
 地形生成トライアル/
 ├── land_evolution.py           # 【メイン】地形進化シミュレーション
 ├── natural_terrain.py          # パーリンノイズによる初期地形生成
-├── coastal_evolution.py        # 沿岸地形シミュレーション
-├── space_coastal.py            # SPACE（侵食＋堆積）版
+├── land_evolution_space.py     # SPACE（侵食＋堆積）版
 ├── terrain_to_tiles.py         # タイルマップ変換
 ├── memo.md                     # このファイル
 ├── archive/                    # 過去の試行錯誤
 │   ├── trial_images/           # 過去に生成した画像
-│   └── old_scripts/            # 過去の試行スクリプト
+│   ├── old_scripts/            # 過去の試行スクリプト
+│   └── temp/                   # 一時退避スクリプト（coastal_evolution.py など）
 └── ドキュメント/               # プロジェクトドキュメント
 ```
 
