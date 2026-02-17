@@ -4,10 +4,13 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 from matplotlib.colors import LightSource
 from noise import pnoise2
 from landlab import RasterModelGrid
 from landlab.components import FlowAccumulator
+
+OUTPUT_DIR = Path(__file__).resolve().parent / "archive" / "trial_images"
 
 def generate_mountain_terrain(nrows, ncols, seed=42):
     """
@@ -121,6 +124,8 @@ ax.contour(drainage, levels=levels, colors=['cyan', 'blue', 'darkblue'],
 ax.set_title('Terrain + Rivers\n(rivers should flow in valleys)')
 
 plt.tight_layout()
-plt.savefig("natural_terrain.png", dpi=150)
-print(f"\nSaved: natural_terrain.png")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+output_path = OUTPUT_DIR / "natural_terrain.png"
+plt.savefig(output_path, dpi=150)
+print(f"\nSaved: {output_path}")
 plt.show()
