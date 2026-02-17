@@ -35,6 +35,7 @@ Uplift (地殻隆起):
 
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 from matplotlib.colors import LightSource
 from noise import pnoise2
 from landlab import RasterModelGrid, imshow_grid
@@ -68,6 +69,14 @@ TMAX = 100000         # 総シミュレーション時間 [yr]（10万年）
 # 初期地形
 INITIAL_AMPLITUDE = 200.0  # 初期地形の振幅 [m]
 BASE_SLOPE = 0.005         # 基本傾斜（排水のため）
+
+OUTPUT_DIR = Path(__file__).resolve().parent / "archive" / "trial_images"
+
+
+def resolve_output_path(filename):
+    """出力先を archive/trial_images に固定"""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    return OUTPUT_DIR / Path(filename).name
 
 
 def generate_perlin_terrain(nrows, ncols, seed=42, amplitude=200.0):
@@ -316,8 +325,9 @@ def visualize_results(results, output_file="land_evolution_result.png"):
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     plt.tight_layout()
-    plt.savefig(output_file, dpi=150)
-    print(f"\n結果を {output_file} に保存しました")
+    save_path = resolve_output_path(output_file)
+    plt.savefig(save_path, dpi=150)
+    print(f"\n結果を {save_path} に保存しました")
     
     return fig
 
@@ -347,8 +357,9 @@ def visualize_time_evolution(snapshots, output_file="land_evolution_timelapse.pn
     
     plt.suptitle('地形の時間発展', fontsize=14)
     plt.tight_layout()
-    plt.savefig(output_file, dpi=150)
-    print(f"タイムラプスを {output_file} に保存しました")
+    save_path = resolve_output_path(output_file)
+    plt.savefig(save_path, dpi=150)
+    print(f"タイムラプスを {save_path} に保存しました")
     
     return fig
 
