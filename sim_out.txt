@@ -1,0 +1,46 @@
+
+============================================================
+SPACE Terrain Evolution Simulation
+============================================================
+
+[Basic SPACE Simulation]
+============================================================
+SPACE Terrain Evolution Simulation
+============================================================
+Grid: 150 x 150, dx = 50.0 m
+Domain: 7.5 km x 7.5 km
+Uplift rate: 1.0 mm/yr
+K_br (bedrock): 1.0e-05
+K_sed (sediment): 3.0e-05 (3.0x bedrock)
+Initial relief ratio: 30.0% of domain length
+Sediment porosity (phi): 0.3
+Fine fraction (F_f): 0.0
+Simulation time: 300 kyr
+Sea level: 0.0 m
+Sea particles: ON
+Boundary z fixed:    False  (False = boundary also uplifts)
+Boundary flow open:  True  (True = flow exits, False = wall)
+============================================================
+  [terrain] all-border p20 shift: -703.0 m
+History dir: D:\workspace_win10_onM\terraform\archive\trial_images\history\20260218_115827_space_v3_main
+  [t=0] z<=0m: 28.6%  Ocean(connected)=28.6%  Lake(isolated)=0.0%
+
+Simulation starting...
+  [OK] t=10 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 10 kyr: z<=0m 28.9%  Ocean(connected)=28.9%  Lake(isolated)=0.0% -> terrain_0010kyr.png
+  [OK] t=20 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 20 kyr: z<=0m 29.1%  Ocean(connected)=29.0%  Lake(isolated)=0.1% -> terrain_0020kyr.png
+  30 kyr... (mean soil: 1.94 m, high-E ratio: 0.40, mean E: 0.7518, particle speed: 0.34)
+  [OK] t=30 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 30 kyr: z<=0m 29.2%  Ocean(connected)=29.1%  Lake(isolated)=0.1% -> terrain_0030kyr.png
+  [OK] t=40 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 40 kyr: z<=0m 29.3%  Ocean(connected)=29.2%  Lake(isolated)=0.1% -> terrain_0040kyr.png
+  [OK] t=50 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 50 kyr: z<=0m 29.2%  Ocean(connected)=29.1%  Lake(isolated)=0.1% -> terrain_0050kyr.png
+  60 kyr... (mean soil: 3.35 m, high-E ratio: 0.40, mean E: 0.9034, particle speed: 0.34)
+  [OK] t=60 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 60 kyr: z<=0m 29.2%  Ocean(connected)=29.1%  Lake(isolated)=0.2% -> terrain_0060kyr.png
+  [OK] t=70 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 70 kyr: z<=0m 29.2%  Ocean(connected)=28.9%  Lake(isolated)=0.2% -> terrain_0070kyr.png
+  [OK] t=80 kyr: ‘S‹«ŠEƒm[ƒhz=0 (596 ŒÂ)
+    [history] 80 kyr: z<=0m 29.1%  Ocean(connected)=28.8%  Lake(isolated)=0.2% -> terrain_0080kyr.png

@@ -399,6 +399,8 @@ def run_space_simulation(
     history_run_name="space_v3",
     boundary_z_fixed=BOUNDARY_Z_FIXED,
     boundary_flow_open=BOUNDARY_FLOW_OPEN,
+    initial_terrain_csv=None,
+    export_initial_terrain_csv=None,
 ):
     """SPACE モジュールを使った地形進化シミュレーション"""
     print("=" * 60)
@@ -423,13 +425,27 @@ def run_space_simulation(
     mg = RasterModelGrid(shape=(nrows, ncols), xy_spacing=dx)
     
     # ----- 初期地形 -----
-    terrain_2d = generate_initial_terrain(
-        nrows,
-        ncols,
-        dx=dx,
-        seed=seed,
-        relief_ratio=relief_ratio,
-    )
+    if initial_terrain_csv is not None:
+        terrain_2d = np.loadtxt(initial_terrain_csv, delimiter=",")
+        if terrain_2d.shape != (nrows, ncols):
+            raise ValueError(
+                f"initial_terrain_csv shape mismatch: expected {(nrows, ncols)}, got {terrain_2d.shape}"
+            )
+        print(f"  [terrain] loaded from CSV: {initial_terrain_csv}")
+    else:
+        terrain_2d = generate_initial_terrain(
+            nrows,
+            ncols,
+            dx=dx,
+            seed=seed,
+            relief_ratio=relief_ratio,
+        )
+
+    if export_initial_terrain_csv is not None:
+        export_path = Path(export_initial_terrain_csv)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savetxt(export_path, terrain_2d, delimiter=",", fmt="%.10f")
+        print(f"  [terrain] exported CSV: {export_path}")
     
     z = mg.add_zeros("topographic__elevation", at="node")
     z += terrain_2d.ravel()
@@ -529,7 +545,8 @@ def run_space_simulation(
             z[mg.core_nodes] += uplift_rate * dt
         else:
             z += uplift_rate * dt  # 境界ノードも含む全ノード
-            # 注意: SPACEは境界ノードを侵食しないため、境界の高さは隆起のみ上がり続ける
+            # 境界は常に海面z=0に固定（base level）
+            z[mg.boundary_nodes] = 0.0
         
         # 2. 斜面拡散
         ld.run_one_step(dt)
@@ -596,6 +613,22 @@ def run_space_simulation(
             })
 
         if save_history_images and history_dir is not None and (total_time % history_interval == 0):
+            # ---- 境界ノードz=0チェック ----
+            bnd_z = z[mg.boundary_nodes]
+            nonzero_mask = bnd_z != 0.0
+            if nonzero_mask.any():
+                nonzero_count = nonzero_mask.sum()
+                nonzero_min   = bnd_z[nonzero_mask].min()
+                nonzero_max   = bnd_z[nonzero_mask].max()
+                print(
+                    f"  [ALERT] t={total_time/1000:.0f} kyr: "
+                    f"境界ノード {nonzero_count}/{len(bnd_z)} 個がz!=0 "
+                    f"(range: {nonzero_min:.4f} ~ {nonzero_max:.4f} m)"
+                )
+            else:
+                print(f"  [OK] t={total_time/1000:.0f} kyr: 全境界ノードz=0 ({len(bnd_z)} 個)")
+            # --------------------------------
+
             z_now = z.reshape((nrows, ncols))
             sea_ratio_now = float(np.mean(z_now <= sea_level))
             ocean_mask_now, lake_mask_now = classify_ocean(z_now, sea_level)
@@ -916,6 +949,8 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("SPACE Terrain Evolution Simulation")
     print("="*60 + "\n")
+
+    shared_terrain_csv = OUTPUT_DIR / "shared_initial_terrain_150x150_seed42.csv"
     
     # ---- 基本シミュレーション ----
     print("[Basic SPACE Simulation]")
@@ -943,6 +978,7 @@ if __name__ == "__main__":
         history_run_name="space_v3_main",
         boundary_z_fixed=BOUNDARY_Z_FIXED,
         boundary_flow_open=BOUNDARY_FLOW_OPEN,
+        export_initial_terrain_csv=shared_terrain_csv,
     )
     
     visualize_space_results(results, "space_coastal.png")

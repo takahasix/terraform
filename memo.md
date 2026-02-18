@@ -212,6 +212,10 @@ visualize_space_results(results, "space_result.png")
 - 2026/02/18: `land_evolution_space_v2.py` に「SPACE→海用パーティクル」の2段階更新を追加（標高0以下を海中判定）
 - 2026/02/18: `land_evolution_space_v2.py` に history フレーム出力を追加（`archive/trial_images/history/<timestamp>_...` へ定期間隔保存）
 - 2026/02/18: `land_evolution_space_v2.py` の初期地形高低差を固定300mから「ドメイン長×比率（既定30%）」へ変更（`relief_ratio` パラメータ化）
+- 2026/02/18: `csharp/TerrainSimCs` を追加（C#最小移植: 初期地形生成・4辺境界z=0固定・Ocean/Lake判定・境界アラート、`dotnet build` 通過確認）
+- 2026/02/18: `csharp/TerrainSimCs` を拡張（D8集水 + bedrock/soil 2層の簡易SPACE-likeステップを追加、`dotnet run` で50kyr動作確認）
+- 2026/02/18: Python/C#比較用に共有初期地形CSV（`archive/trial_images/shared_initial_terrain_150x150_seed42.csv`）を導入し、C#側で1万年ごとに履歴画像（PPM）を `archive/trial_images/history_cs/...` へ出力するよう変更
+- 2026/02/18: C#側の海パーティクル更新を `land_evolution_space_v3.py` の `update_sea_particles` と同等式へ移植（高/低エネルギー分岐・速度ノイズ・土砂積載更新・クリップ・統計出力）し、履歴PNGへ粒子点を重畳表示
 
 ## タスク管理
 - [x] プロジェクト初期化
@@ -236,6 +240,8 @@ visualize_space_results(results, "space_result.png")
 ├── natural_terrain.py          # パーリンノイズによる初期地形生成
 ├── land_evolution_space.py     # SPACE（侵食＋堆積）版
 ├── terrain_to_tiles.py         # タイルマップ変換
+├── csharp/                     # C#移植トライアル
+│   └── TerrainSimCs/           # 最小シミュレーション（コンパイル通過済み）
 ├── memo.md                     # このファイル
 ├── archive/                    # 過去の試行錯誤
 │   ├── trial_images/           # 過去に生成した画像

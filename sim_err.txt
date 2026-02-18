@@ -1,0 +1,28 @@
+D:\workspace_win10_onM\terraform\.venv\Lib\site-packages\landlab\graph\sort\sort.py:724: UserWarning: 'where' used without 'out', expect unitialized memory in output. If this is intentional, use out=None.
+  angle_of_spoke_at_hub = np.arctan2(dy, dx, where=spokes_at_hub != -1)
+Traceback (most recent call last):
+  File "D:\workspace_win10_onM\terraform\land_evolution_space_v3.py", line 939, in <module>
+    results = run_space_simulation(
+        nrows=150,
+    ...<21 lines>...
+        boundary_flow_open=BOUNDARY_FLOW_OPEN,
+    )
+  File "D:\workspace_win10_onM\terraform\land_evolution_space_v3.py", line 542, in run_space_simulation
+    df.map_depressions()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "D:\workspace_win10_onM\terraform\.venv\Lib\site-packages\landlab\components\depression_finder\lake_mapper.py", line 926, in map_depressions
+    self._identify_depressions_and_outlets(self._reroute_flow)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "D:\workspace_win10_onM\terraform\.venv\Lib\site-packages\landlab\components\depression_finder\lake_mapper.py", line 834, in _identify_depressions_and_outlets
+    self.find_depression_from_pit(pit_node, reroute_flow)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\workspace_win10_onM\terraform\.venv\Lib\site-packages\landlab\components\depression_finder\lake_mapper.py", line 780, in find_depression_from_pit
+    found_outlet = self.is_valid_outlet(lowest_node_on_perimeter)
+  File "D:\workspace_win10_onM\terraform\.venv\Lib\site-packages\landlab\components\depression_finder\lake_mapper.py", line 676, in is_valid_outlet
+    if self._grid.status_at_node[the_node] == self._grid.BC_NODE_IS_FIXED_VALUE:
+       ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\workspace_win10_onM\terraform\.venv\Lib\site-packages\landlab\grid\decorators.py", line 65, in _wrapped
+    class array(np.ndarray):
+    ...<20 lines>...
+            getattr(self.grid, reset)()
+KeyboardInterrupt
