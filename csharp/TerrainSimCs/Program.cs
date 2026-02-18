@@ -312,6 +312,89 @@ static void SaveTerrainCsv(double[,] terrain, string csvPath)
     }
 }
 
+// ============================================================
+// matplotlib の terrain カラーマップ (主要ノード 9 点を手動定義)
+// https://matplotlib.org/stable/gallery/color/colormap_reference.html
+// ============================================================
+static (byte R, byte G, byte B) TerrainColormap(double t)
+{
+    // matplotlib 'terrain' の代表的な色ノード (t=0..1)
+    // t=0.0: 深海 (0, 0, 0.5)
+    // t=0.17: 浅海 (0, 0.6, 1.0)
+    // t=0.23: 海岸線/砂 (0.741, 0.718, 0.420)
+    // t=0.27: 低地 (0.18, 0.55, 0.18)
+    // t=0.50: 山麓 (0.42, 0.65, 0.30)
+    // t=0.75: 高山 (0.73, 0.70, 0.55)
+    // t=0.87: 岩肌 (0.80, 0.77, 0.68)
+    // t=1.00: 雪 (1.0, 1.0, 1.0)
+    ReadOnlySpan<double> ks = [0.00, 0.17, 0.23, 0.27, 0.50, 0.75, 0.87, 1.00];
+    ReadOnlySpan<double> rs = [0.00, 0.00, 0.741, 0.18, 0.42, 0.73, 0.80, 1.00];
+    ReadOnlySpan<double> gs = [0.00, 0.60, 0.718, 0.55, 0.65, 0.70, 0.77, 1.00];
+    ReadOnlySpan<double> bs = [0.50, 1.00, 0.420, 0.18, 0.30, 0.55, 0.68, 1.00];
+
+    t = Math.Clamp(t, 0.0, 1.0);
+    var i = 0;
+    while (i < ks.Length - 2 && t > ks[i + 1]) i++;
+    var lo = ks[i]; var hi = ks[i + 1];
+    var u = (hi > lo) ? (t - lo) / (hi - lo) : 0.0;
+    var rv = rs[i] + u * (rs[i + 1] - rs[i]);
+    var gv = gs[i] + u * (gs[i + 1] - gs[i]);
+    var bv = bs[i] + u * (bs[i + 1] - bs[i]);
+    return ((byte)(rv * 255), (byte)(gv * 255), (byte)(bv * 255));
+}
+
+// ============================================================
+// LightSource ヒルシェーディング
+// matplotlib LightSource(azdeg=315, altdeg=45), vert_exag=2
+// blend_mode='overlay' を近似: shade * overlay_blend(base, intensity)
+// ============================================================
+static double[,] ComputeHillshade(double[,] z, double dx,
+    double azdegDeg = 315.0, double altdegDeg = 45.0, double vertExag = 2.0)
+{
+    var nrows = z.GetLength(0);
+    var ncols = z.GetLength(1);
+    var hs = new double[nrows, ncols];
+
+    // 光源ベクトル (matplotlib と同じ定義)
+    var az  = (360.0 - azdegDeg + 90.0) * Math.PI / 180.0; // 北→東→南→西
+    var alt = altdegDeg * Math.PI / 180.0;
+    var lx = Math.Cos(alt) * Math.Cos(az);
+    var ly = Math.Cos(alt) * Math.Sin(az);
+    var lz = Math.Sin(alt);
+
+    for (var r = 0; r < nrows; r++)
+    {
+        for (var c = 0; c < ncols; c++)
+        {
+            // 中央差分で法線ベクトルを計算 (vert_exag を掛けた高さで)
+            var dzdx = r > 0 && r < nrows - 1
+                ? (z[r + 1, c] - z[r - 1, c]) * vertExag / (2.0 * dx)
+                : 0.0;
+            var dzdy = c > 0 && c < ncols - 1
+                ? (z[r, c + 1] - z[r, c - 1]) * vertExag / (2.0 * dx)
+                : 0.0;
+            // 法線 n = (-dz/dx, -dz/dy, 1) を正規化
+            var nx = -dzdx; var ny = -dzdy; var nz = 1.0;
+            var nlen = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+            nx /= nlen; ny /= nlen; nz /= nlen;
+            // 輝度 = 内積, 0..1 にクランプ
+            hs[r, c] = Math.Max(0.0, lx * nx + ly * ny + lz * nz);
+        }
+    }
+    return hs;
+}
+
+// overlay blend: base=カラーマップ輝度値 (0..1), intensity=hillshade (0..1)
+// matplotlib blend_mode='overlay' の近似
+static double OverlayBlend(double base_, double intensity)
+{
+    // overlay: if base < 0.5 => 2*base*intensity, else 1-2*(1-base)*(1-intensity)
+    if (base_ < 0.5)
+        return 2.0 * base_ * intensity;
+    else
+        return 1.0 - 2.0 * (1.0 - base_) * (1.0 - intensity);
+}
+
 static void SaveTerrainPng(
     double[,] z,
     double seaLevel,
@@ -324,128 +407,114 @@ static void SaveTerrainPng(
 
     var dir = Path.GetDirectoryName(filePath);
     if (!string.IsNullOrWhiteSpace(dir))
-    {
         Directory.CreateDirectory(dir);
-    }
 
-    var min = double.PositiveInfinity;
-    var max = double.NegativeInfinity;
+    // --- 標高の全体範囲 ---
+    var zMin = double.PositiveInfinity;
+    var zMax = double.NegativeInfinity;
     for (var r = 0; r < nrows; r++)
-    {
         for (var c = 0; c < ncols; c++)
         {
-            var v = z[r, c];
-            if (v < min) min = v;
-            if (v > max) max = v;
+            if (z[r, c] < zMin) zMin = z[r, c];
+            if (z[r, c] > zMax) zMax = z[r, c];
         }
-    }
+    var zSpan = Math.Max(zMax - zMin, 1e-12);
 
-    var span = Math.Max(max - min, 1e-12);
+    // --- ヒルシェーディング ---
+    var hillshade = ComputeHillshade(z, Dx, azdegDeg: 315, altdegDeg: 45, vertExag: 2.0);
+
+    // --- ocean / lake マスク ---
     var oceanMask = new bool[nrows, ncols];
-    var lakeMask = new bool[nrows, ncols];
+    var lakeMask  = new bool[nrows, ncols];
     if (includeOceanLakeOverlay)
-    {
         (oceanMask, lakeMask) = ClassifyOcean(z, seaLevel);
-    }
 
+    // --- 川しきい値 ---
     var riverLevel1 = double.PositiveInfinity;
     var riverLevel2 = double.PositiveInfinity;
     var riverLevel3 = double.PositiveInfinity;
     if (drainageAreaFlat is not null && drainageAreaFlat.Length == nrows * ncols)
     {
-        var positiveLandDrainage = new List<double>();
+        var posDrain = new List<double>();
         for (var rr = 0; rr < nrows; rr++)
-        {
             for (var cc = 0; cc < ncols; cc++)
             {
-                if (z[rr, cc] <= seaLevel)
-                {
-                    continue;
-                }
-
-                var idx = rr * ncols + cc;
-                var a = drainageAreaFlat[idx];
-                if (a > 0.0)
-                {
-                    positiveLandDrainage.Add(a);
-                }
+                if (z[rr, cc] <= seaLevel) continue;
+                var a = drainageAreaFlat[rr * ncols + cc];
+                if (a > 0.0) posDrain.Add(a);
             }
-        }
-
-        if (positiveLandDrainage.Count > 0)
+        if (posDrain.Count > 0)
         {
-            riverLevel1 = Percentile(positiveLandDrainage, 80.0);
-            riverLevel2 = Percentile(positiveLandDrainage, 90.0);
-            riverLevel3 = Percentile(positiveLandDrainage, 95.0);
+            riverLevel1 = Percentile(posDrain, 80.0);
+            riverLevel2 = Percentile(posDrain, 90.0);
+            riverLevel3 = Percentile(posDrain, 95.0);
         }
     }
+
     using var image = new Image<Rgb24>(ncols, nrows);
 
     for (var rr = nrows - 1; rr >= 0; rr--)
     {
         for (var c = 0; c < ncols; c++)
         {
-            byte r;
-            byte g;
-            byte b;
+            // 画像の行: origin='lower' に合わせて上下反転
+            var imgRow = nrows - 1 - rr;
+            var hs = hillshade[rr, c];
+
+            byte pr, pg, pb;
 
             if (includeOceanLakeOverlay && oceanMask[rr, c])
             {
-                r = 30;
-                g = 120;
-                b = 220;
+                // 海: dodgerblue ベースにヒルシェード
+                var d = 0.3 + 0.7 * hs; // 暗くしすぎない
+                pr = (byte)(30  * d);
+                pg = (byte)(144 * d);
+                pb = (byte)(255 * d);
             }
             else if (includeOceanLakeOverlay && lakeMask[rr, c])
             {
-                r = 220;
-                g = 70;
-                b = 50;
+                // 湖: tomato
+                var d = 0.3 + 0.7 * hs;
+                pr = (byte)(255 * d);
+                pg = (byte)(99  * d);
+                pb = (byte)(71  * d);
             }
             else
             {
-                var t = (z[rr, c] - min) / span;
-                t = Math.Clamp(t, 0.0, 1.0);
-                if (t < 0.5)
-                {
-                    var u = t / 0.5;
-                    r = (byte)(30 + u * (80 - 30));
-                    g = (byte)(80 + u * (170 - 80));
-                    b = (byte)(30 + u * (80 - 30));
-                }
-                else
-                {
-                    var u = (t - 0.5) / 0.5;
-                    r = (byte)(80 + u * (230 - 80));
-                    g = (byte)(170 + u * (230 - 170));
-                    b = (byte)(80 + u * (230 - 80));
-                }
+                // 陸: terrain カラーマップ + overlay hillshade
+                var t = (z[rr, c] - zMin) / zSpan;
+                var (tr, tg, tb) = TerrainColormap(t);
 
+                // overlay blend per channel
+                var br2 = tr / 255.0;
+                var bg2 = tg / 255.0;
+                var bb2 = tb / 255.0;
+                var blendR = OverlayBlend(br2, hs);
+                var blendG = OverlayBlend(bg2, hs);
+                var blendB = OverlayBlend(bb2, hs);
+                pr = (byte)(Math.Clamp(blendR, 0.0, 1.0) * 255);
+                pg = (byte)(Math.Clamp(blendG, 0.0, 1.0) * 255);
+                pb = (byte)(Math.Clamp(blendB, 0.0, 1.0) * 255);
+
+                // 川オーバーレイ (シアン, 半透明風)
                 if (drainageAreaFlat is not null && z[rr, c] > seaLevel)
                 {
-                    var idx = rr * ncols + c;
-                    var a = drainageAreaFlat[idx];
-                    if (a >= riverLevel3)
+                    var a = drainageAreaFlat[rr * ncols + c];
+                    double alpha = 0.0;
+                    (byte cr, byte cg, byte cb) riverCol = (0, 120, 255);
+                    if (a >= riverLevel3)      { alpha = 0.75; riverCol = (0, 120, 255); }
+                    else if (a >= riverLevel2) { alpha = 0.65; riverCol = (40, 170, 255); }
+                    else if (a >= riverLevel1) { alpha = 0.50; riverCol = (90, 210, 255); }
+                    if (alpha > 0.0)
                     {
-                        r = 0;
-                        g = 120;
-                        b = 255;
-                    }
-                    else if (a >= riverLevel2)
-                    {
-                        r = 40;
-                        g = 170;
-                        b = 255;
-                    }
-                    else if (a >= riverLevel1)
-                    {
-                        r = 90;
-                        g = 210;
-                        b = 255;
+                        pr = (byte)(pr * (1 - alpha) + riverCol.cr * alpha);
+                        pg = (byte)(pg * (1 - alpha) + riverCol.cg * alpha);
+                        pb = (byte)(pb * (1 - alpha) + riverCol.cb * alpha);
                     }
                 }
             }
 
-            image[c, nrows - 1 - rr] = new Rgb24(r, g, b);
+            image[c, imgRow] = new Rgb24(pr, pg, pb);
         }
     }
 
