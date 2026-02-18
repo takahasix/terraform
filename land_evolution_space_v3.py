@@ -1,5 +1,11 @@
 """
-SPACE モジュールを使った沿岸地形進化シミュレーション
+SPACE モジュールを使った沿岸地形進化シミュレーション (v3: D-infinity flow routing)
+
+v2 からの変更点:
+- FlowAccumulator の flow_director を D8 → DInfinity (Dinf) に変更
+- Dinf は流向を任意の角度に2方向分割するため、川が縦・横・斜め45度の
+  直線にならず自然な曲線になる
+- SPACE本体もDinfの集水面積を使用する
 
 SPACE (Stream Power with Alluvium Conservation and Entrainment) の特徴:
 - 侵食だけでなく「堆積」も扱える
@@ -67,6 +73,14 @@ F_F = 0.0             # 細粒分割合（0 = すべて堆積、1 = すべて流
 DT = 1000
 TMAX = 300000         # 30万年
 
+# 境界条件フラグ
+# BOUNDARY_Z_FIXED  : True  = 境界ノードのzを初期値に固定（地質学的な base level モデル）
+#                    False = 境界ノードも隙起する（ドメイン全体が一様に上がる）
+# BOUNDARY_FLOW_OPEN: True  = 水・土砂が境界を通過できる（open）
+#                    False = 境界は壁、流量ゼロ（closed）
+BOUNDARY_Z_FIXED   = False
+BOUNDARY_FLOW_OPEN = True
+
 OUTPUT_DIR = Path(__file__).resolve().parent / "archive" / "trial_images"
 
 
@@ -84,13 +98,26 @@ def create_history_dir(run_name="space_v2"):
     return history_dir
 
 
-def classify_ocean(z_2d, sea_level, open_boundary_row=0):
+def compute_dinf_drainage(z_2d, dx):
+    """DINF flow routing で集水面積を計算して返す。一時グリッドを使うのでメイングリッドの状態に影響しない"""
+    nrows, ncols = z_2d.shape
+    tmp = RasterModelGrid(shape=(nrows, ncols), xy_spacing=dx)
+    tmp.add_field("topographic__elevation", z_2d.ravel().copy(), at="node")
+    # 4辺全開放（メイングリッドと合わせる）
+    tmp.set_closed_boundaries_at_grid_edges(
+            right_is_closed=False, top_is_closed=False,
+            left_is_closed=False, bottom_is_closed=False,
+        )
+    fa_tmp = FlowAccumulator(tmp, flow_director='DINF')
+    fa_tmp.run_one_step()
+    return tmp.at_node["drainage_area"].reshape(nrows, ncols)
+def classify_ocean(z_2d, sea_level):
     """
-    開放境界行（デフォルト: row 0 = 下辺）から flood fill で
-    z <= sea_level に繋がったセルを Ocean、孤立したものを Lake と判定。
+    4辺すべての境界から flood fill で z <= sea_level に繋がったセルを Ocean、
+    孤立したものを Lake と判定。
 
     Returns:
-        ocean_mask: (nrows, ncols) bool  開放境界に繋がった水域
+        ocean_mask: (nrows, ncols) bool  外周境界に繋がった水域
         lake_mask:  (nrows, ncols) bool  孤立した内陸水域
     """
     from scipy.ndimage import label
@@ -102,12 +129,15 @@ def classify_ocean(z_2d, sea_level, open_boundary_row=0):
     # 4連結でラベリング
     labeled, _ = label(below, structure=np.array([[0,1,0],[1,1,1],[0,1,0]]))
 
-    # 開放境界行のラベル集合（0 = 陸）
-    open_labels = set(labeled[open_boundary_row, :].tolist())
+    # 4辺すべてのラベルを集める
+    open_labels = set()
+    open_labels.update(labeled[0, :].tolist())   # 下辺
+    open_labels.update(labeled[-1, :].tolist())  # 上辺
+    open_labels.update(labeled[:, 0].tolist())   # 左辺
+    open_labels.update(labeled[:, -1].tolist())  # 右辺
     open_labels.discard(0)
 
     if not open_labels:
-        # 開放境界行に海セルがない → 全部 lake 扱い
         return np.zeros_like(z_2d, dtype=bool), below.copy()
 
     ocean_mask = np.isin(labeled, list(open_labels)) & below
@@ -117,7 +147,7 @@ def classify_ocean(z_2d, sea_level, open_boundary_row=0):
 
 def save_history_frame(z_2d, sea_level, out_path, title, particle_xy=None, drainage=None):
     """途中経過の標高画像を保存（左: 単純z<=0マスク / 右: 連結成分Ocean判定）"""
-    ocean_mask, lake_mask = classify_ocean(z_2d, sea_level, open_boundary_row=0)
+    ocean_mask, lake_mask = classify_ocean(z_2d, sea_level)
     sea_mask_simple = z_2d <= sea_level
 
     ls = LightSource(azdeg=315, altdeg=45)
@@ -134,11 +164,11 @@ def save_history_frame(z_2d, sea_level, out_path, title, particle_xy=None, drain
             land_drain[sea_mask_simple] = 0
             positive = land_drain[land_drain > 0]
             if len(positive) > 0:
-                lvls = [np.percentile(positive, p) for p in [90, 95, 98]]
+                lvls = [np.percentile(positive, p) for p in [80, 90, 95]]
                 ax.contour(
                     drainage, levels=lvls,
                     colors=['cyan', 'deepskyblue', 'blue'],
-                    linewidths=[0.5, 1.0, 1.8],
+                    linewidths=[0.5, 0.5, 0.5],
                     origin='lower',
                 )
         if particle_xy is not None:
@@ -326,17 +356,17 @@ def generate_initial_terrain(
     target_relief_m = domain_length_m * relief_ratio
     terrain *= target_relief_m
 
-    # 外周セルの下位10%が海面(0m)になるようシフト
-    # → 初期から境界の一定割合が0以下＝海に繋がる低地が存在する
+    # 4辺全体のp20が海面(0m)になるようシフト
+    # → 全辺開放なので全辺に一定割合の海セルが生まれるようにする
     border_vals = np.concatenate([
-        terrain[0, :],         # 下辺
-        terrain[-1, :],        # 上辺
-        terrain[1:-1, 0],      # 左辺（角除く）
-        terrain[1:-1, -1],     # 右辺（角除く）
+        terrain[0, :],
+        terrain[-1, :],
+        terrain[1:-1, 0],
+        terrain[1:-1, -1],
     ])
-    shift = np.percentile(border_vals, 10)
+    shift = np.percentile(border_vals, 20)
     terrain -= shift
-    print(f"  [terrain] border p10 shift: -{shift:.1f} m (10% of border cells now <= 0 m)")
+    print(f"  [terrain] all-border p20 shift: -{shift:.1f} m")
 
     return terrain
 
@@ -366,7 +396,9 @@ def run_space_simulation(
     particle_seed=123,
     history_interval=50000,
     save_history_images=True,
-    history_run_name="space_v2",
+    history_run_name="space_v3",
+    boundary_z_fixed=BOUNDARY_Z_FIXED,
+    boundary_flow_open=BOUNDARY_FLOW_OPEN,
 ):
     """SPACE モジュールを使った地形進化シミュレーション"""
     print("=" * 60)
@@ -383,6 +415,8 @@ def run_space_simulation(
     print(f"Simulation time: {tmax/1000:.0f} kyr")
     print(f"Sea level: {sea_level:.1f} m")
     print(f"Sea particles: {'ON' if enable_sea_particles else 'OFF'}")
+    print(f"Boundary z fixed:    {boundary_z_fixed}  (False = boundary also uplifts)")
+    print(f"Boundary flow open:  {boundary_flow_open}  (True = flow exits, False = wall)")
     print("=" * 60)
     
     # ----- グリッド作成 -----
@@ -399,18 +433,22 @@ def run_space_simulation(
     
     z = mg.add_zeros("topographic__elevation", at="node")
     z += terrain_2d.ravel()
+    z[mg.boundary_nodes] = 0.0
     z_initial = z.copy()
     
     # ----- 堆積物層（初期は薄い表土）-----
     soil = mg.add_zeros("soil__depth", at="node")
     soil += 0.5  # 初期50cm の表土
     
-    # ----- 境界条件 -----
+    # ----- 境界条件: BOUNDARY_FLOW_OPEN フラグで制御 -----
+    # True  = 4辺すべてopen（流量・土砂が通過できる）
+    # False = 下辺のみopen、残り3辺はclosed（壁）
+    _c = not boundary_flow_open
     mg.set_closed_boundaries_at_grid_edges(
-        right_is_closed=True,
-        top_is_closed=True,
-        left_is_closed=True,
-        bottom_is_closed=False,
+        right_is_closed=_c,
+        top_is_closed=_c,
+        left_is_closed=_c,
+        bottom_is_closed=False,  # 下辺は常に開放（最低1辺の出口を保証）
     )
 
     # ----- コンポーネント初期化 -----
@@ -463,7 +501,7 @@ def run_space_simulation(
 
         if save_history_images and history_dir is not None:
             z_init_2d = z.reshape((nrows, ncols))
-            ocean_m0, lake_m0 = classify_ocean(z_init_2d, sea_level, open_boundary_row=0)
+            ocean_m0, lake_m0 = classify_ocean(z_init_2d, sea_level)
             print(
                 f"  [t=0] z<=0m: {100*np.mean(z_init_2d<=sea_level):.1f}%  "
                 f"Ocean(connected)={100*ocean_m0.mean():.1f}%  Lake(isolated)={100*lake_m0.mean():.1f}%"
@@ -485,7 +523,13 @@ def run_space_simulation(
     
     for ti in t_values:
         # 1. 地殻隆起
-        z[mg.core_nodes] += uplift_rate * dt
+        # BOUNDARY_Z_FIXED=True : core_nodesのみ隆起→境界はz固定（base levelモデル）
+        # BOUNDARY_Z_FIXED=False: 境界含む全ノードを隆起→ドメイン全体が一様に上「浮く」
+        if boundary_z_fixed:
+            z[mg.core_nodes] += uplift_rate * dt
+        else:
+            z += uplift_rate * dt  # 境界ノードも含む全ノード
+            # 注意: SPACEは境界ノードを侵食しないため、境界の高さは隆起のみ上がり続ける
         
         # 2. 斜面拡散
         ld.run_one_step(dt)
@@ -554,10 +598,11 @@ def run_space_simulation(
         if save_history_images and history_dir is not None and (total_time % history_interval == 0):
             z_now = z.reshape((nrows, ncols))
             sea_ratio_now = float(np.mean(z_now <= sea_level))
-            ocean_mask_now, lake_mask_now = classify_ocean(z_now, sea_level, open_boundary_row=0)
+            ocean_mask_now, lake_mask_now = classify_ocean(z_now, sea_level)
             ocean_pct = 100.0 * ocean_mask_now.mean()
             lake_pct  = 100.0 * lake_mask_now.mean()
-            drainage_now = mg.at_node["drainage_area"].copy().reshape((nrows, ncols))
+            # DINF集水面積を可視化用に計算（メイングリッドに影響なし）
+            drainage_viz = compute_dinf_drainage(z_now, dx)
             particle_xy = None
             if enable_sea_particles:
                 if particles is None:
@@ -569,7 +614,7 @@ def run_space_simulation(
                 history_dir / f"terrain_{int(total_time/1000):04d}kyr.png",
                 f"Terrain @ {total_time/1000:.0f} kyr",
                 particle_xy=particle_xy,
-                drainage=drainage_now,
+                drainage=drainage_viz,
             )
             print(
                 f"    [history] {total_time/1000:.0f} kyr: "
@@ -676,9 +721,9 @@ def visualize_space_results(results, output_file="space_result.png"):
     land_drainage = drainage.copy()
     land_drainage[sea_mask] = 0
     if np.any(land_drainage > 0):
-        levels = [np.percentile(land_drainage[land_drainage > 0], p) for p in [90, 95, 98]]
+        levels = [np.percentile(land_drainage[land_drainage > 0], p) for p in [80, 90, 95]]
         ax.contour(drainage, levels=levels, colors=['cyan', 'blue', 'darkblue'],
-                   linewidths=[0.5, 1, 2], origin='lower')
+                   linewidths=[0.5, 0.5, 0.5], origin='lower')
     
     ax.contour(z_final, levels=[sea_level], colors='yellow', linewidths=2, origin='lower')
     ax.set_title('Terrain + Rivers + Coastline')
@@ -880,13 +925,13 @@ if __name__ == "__main__":
         dx=50.0,
         uplift_rate=0.001,
         k_br=1.0e-5,
-        k_sed=3.0e-5,  # 堆積物は3倍侵食されやすい
+        k_sed=3.0e-5,
         k_hs=0.05,
         phi=0.3,
-        f_f=0.0,       # 全堆積
+        f_f=0.0,
         relief_ratio=0.30,
         dt=1000,
-        tmax=300000,   # 30万年
+        tmax=300000,
         seed=42,
         save_interval=50000,
         sea_level=0.0,
@@ -895,7 +940,9 @@ if __name__ == "__main__":
         particle_seed=123,
         history_interval=10000,
         save_history_images=True,
-        history_run_name="space_v2_main",
+        history_run_name="space_v3_main",
+        boundary_z_fixed=BOUNDARY_Z_FIXED,
+        boundary_flow_open=BOUNDARY_FLOW_OPEN,
     )
     
     visualize_space_results(results, "space_coastal.png")

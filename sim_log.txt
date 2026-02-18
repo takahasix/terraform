@@ -1,0 +1,2 @@
+D:\workspace_win10_onM\terraform\.venv\Lib\site-packages\landlab\graph\sort\sort.py:724: UserWarning: 'where' used without 'out', expect unitialized memory in output. If this is intentional, use out=None.
+  angle_of_spoke_at_hub = np.arctan2(dy, dx, where=spokes_at_hub != -1)
