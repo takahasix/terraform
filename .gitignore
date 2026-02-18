@@ -154,3 +154,8 @@ cython_debug/
 
 # VS Code
 .vscode/
+
+# シミュレーション生成物（画像・CSV・途中フレーム）
+archive/trial_images/
+archive/temp/*.png
+archive/temp/*.csv

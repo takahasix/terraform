@@ -209,6 +209,9 @@ visualize_space_results(results, "space_result.png")
 - 2026/02/18: `land_evolution_space.py` を簡素化（海専用の固定境界・海浜補正・海面下クランプを削除し、通常SPACE計算へ統一）
 - 2026/02/18: ルート直下の中間生成物を整理（試行スクリプトを archive/old_scripts、確認用画像・CSVを archive/trial_images へ移動）
 - 2026/02/18: ルート直下の実行スクリプト出力を archive/trial_images に固定（画像・CSV の保存先統一）
+- 2026/02/18: `land_evolution_space_v2.py` に「SPACE→海用パーティクル」の2段階更新を追加（標高0以下を海中判定）
+- 2026/02/18: `land_evolution_space_v2.py` に history フレーム出力を追加（`archive/trial_images/history/<timestamp>_...` へ定期間隔保存）
+- 2026/02/18: `land_evolution_space_v2.py` の初期地形高低差を固定300mから「ドメイン長×比率（既定30%）」へ変更（`relief_ratio` パラメータ化）
 
 ## タスク管理
 - [x] プロジェクト初期化
