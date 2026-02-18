@@ -4,11 +4,15 @@ using System.Globalization;
 using System.IO;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 const int Nrows = 150;
 const int Ncols = 150;
 const double Dx = 50.0;
 const double UpliftRate = 0.001;
+// 案B: 境界セルを内険標高の下位N%パーセンタイルに追従させる
+// 0にすると従来通り (=無効化)、大きくすると境界が内険と同じ高さに近づく
+const double BoundaryPercentile = 20.0;
 const double ReliefRatio = 0.30;
 const double KBr = 1.0e-5;
 const double KSed = 3.0e-5;
@@ -21,9 +25,31 @@ const double Ff = 0.0;          // 細粒分割合 (F_f)
 const double KHs = 0.05;        // 斜面拡散係数 (LinearDiffuser)
 const double ThicknessLim = 100.0; // 土層厚上限 (SpaceLargeScaleEroder)
 const int Dt = 1000;
-const int Tmax = 50000;
+const int Tmax = 500000;
 const int HistoryInterval = 10000;
-const double SeaLevel = 0.0;
+// SeaLevel は初期値。境界が上昇すると共に動的に同期する (RunSimulation 内で var に変換)
+const double SeaLevelInitial = 0.0;
+
+// ===== 実験的オプション: 海面変動 & 海岸侵食 =====
+// EnableSeaLevelChange: 海面高度を時間で変化させる (true にすると有効)
+// 200kyr以降に正弦波状の変動を加える。幅と周期は下記定数で調整。
+const bool EnableSeaLevelChange = false;
+// 200kyr 以降に seaLevel を ±この振幅だけ上下させる (m)
+const double SeaLevelAmplitude = 50.0;
+// 海面変動の周期 (yr)。例: 100000 = 10万年周期
+const double SeaLevelPeriod = 100000.0;
+// 海面変動を開始する時刻 (yr)
+const int SeaLevelChangeStartTime = 200000;
+
+// EnableCoastalErosion: 海岸線付近の侵食を追加する (true にすると有効)
+// 海面±CoastalBeltWidth(m) の標高帯にあるセルに追加の侵食を適用する
+const bool EnableCoastalErosion = false;
+// 海岸帯の標高幅 (m)。海面から上この範囲内を海岸帯とみなす
+const double CoastalBeltWidth = 20.0;
+// 波浪侵食係数 (m/yr)。このレートで海岸帯の岩盤を削る
+const double CoastalErosionRate = 1.0e-4;
+// =========================================
+
 const bool EnableSeaParticles = true;
 const int ParticleCount = 3500;
 const int ParticleSeed = 123;
@@ -82,22 +108,37 @@ static void RunSimulation()
     }
 
     var flow0 = ComputeD8Flow(z, Dx);
+    var seaLevel = SeaLevelInitial; // 境界と同期して動的に変化する
     SaveTerrainPng(
         z,
-        SeaLevel,
+        seaLevel,
         Path.Combine(historyDir, "terrain_0000kyr.png"),
         includeOceanLakeOverlay: true,
         drainageAreaFlat: flow0.Area
     );
+    SaveTileMapPng(
+        z, soil, bedrock, seaLevel,
+        Path.Combine(historyDir, "tilemap_0000kyr.png"),
+        drainageAreaFlat: flow0.Area,
+        receiverFlat: flow0.Receiver
+    );
+    SaveSideBySidePng(
+        Path.Combine(historyDir, "terrain_0000kyr.png"),
+        Path.Combine(historyDir, "tilemap_0000kyr.png"),
+        Path.Combine(historyDir, "combined_0000kyr.png")
+    );
 
-    var (ocean0, lake0) = ClassifyOcean(z, SeaLevel);
+    var (ocean0, lake0) = ClassifyOcean(z, seaLevel);
     Console.WriteLine($"[t=0] Ocean={Percentage(ocean0):F1}% Lake={Percentage(lake0):F1}%");
 
     var totalTime = 0;
     while (totalTime < Tmax)
     {
         AddUniformUplift(bedrock, UpliftRate * Dt);
-        SetBoundaryToZero(bedrock);
+        // 境界は内険標高から下位N%パーセンタイルを計算してその値に追従
+        // 返り値はそのパーセンタイル値 = 新しい海面高度
+        seaLevel = SetBoundaryToInlandPercentile(bedrock, soil, BoundaryPercentile);
+        SetBoundaryToZero(soil); // 土層は境界で0固定
 
         // 1. 隆起後の地表標高を再計算
         var zNow = SumFields(bedrock, soil);
@@ -108,7 +149,7 @@ static void RunSimulation()
         for (var r = 0; r < Nrows; r++)
             for (var c = 0; c < Ncols; c++)
                 bedrock[r, c] = zNow[r, c] - Math.Max(soil[r, c], 0.0);
-        SetBoundaryToZero(bedrock);
+        SetBoundaryToInlandPercentile(bedrock, soil, BoundaryPercentile);
         SetBoundaryToZero(soil);
 
         // 3. 窪地充填 (DepressionFinderAndRouter 相当: Priority-Flood)
@@ -149,9 +190,21 @@ static void RunSimulation()
             dx: Dx
         );
 
-        SetBoundaryToZero(bedrock);
+        seaLevel = SetBoundaryToInlandPercentile(bedrock, soil, BoundaryPercentile);
         SetBoundaryToZero(soil);
         z = SumFields(bedrock, soil);
+
+        // ===== 実験的: 海面変動 =====
+        if (EnableSeaLevelChange && totalTime >= SeaLevelChangeStartTime)
+        {
+            // 基準値 seaLevel (境界パーセンタイル) に正弦波変動を重ねる
+            var phase = 2.0 * Math.PI * (totalTime - SeaLevelChangeStartTime) / SeaLevelPeriod;
+            seaLevel += SeaLevelAmplitude * Math.Sin(phase);
+        }
+
+        // ===== 実験的: 海岸侵食 =====
+        if (EnableCoastalErosion)
+            ApplyCoastalErosion(bedrock, soil, seaLevel, CoastalBeltWidth, CoastalErosionRate, Dt);
 
         if (EnableSeaParticles)
         {
@@ -186,22 +239,52 @@ static void RunSimulation()
             {
                 Console.WriteLine($"  [state] mean soil={meanSoil:F3} m, max z={MaxField(z):F1} m");
             }
-            var (ocean, lake) = ClassifyOcean(z, SeaLevel);
+            var (ocean, lake) = ClassifyOcean(z, seaLevel);
             var outPath = Path.Combine(historyDir, $"terrain_{totalTime / 1000:0000}kyr.png");
+            var tileOutPath = Path.Combine(historyDir, $"tilemap_{totalTime / 1000:0000}kyr.png");
             var flowViz = ComputeD8Flow(z, Dx);
             SaveTerrainPng(
                 z,
-                SeaLevel,
+                seaLevel,
                 outPath,
                 includeOceanLakeOverlay: true,
                 drainageAreaFlat: flowViz.Area
             );
+            SaveTileMapPng(
+                z, soil, bedrock, seaLevel,
+                tileOutPath,
+                drainageAreaFlat: flowViz.Area,
+                receiverFlat: flowViz.Receiver
+            );
+            var combinedPath = Path.Combine(historyDir, $"combined_{totalTime / 1000:0000}kyr.png");
+            SaveSideBySidePng(outPath, tileOutPath, combinedPath);
+            // 高解像度タイルマップ (1000×1000, ワンホット+ガウシアン+argmax)
+            var hiresTileOutPath = Path.Combine(historyDir, $"tilemap_hires_{totalTime / 1000:0000}kyr.png");
+            SaveHighResTileMapPng(z, seaLevel, hiresTileOutPath,
+                drainageAreaFlat: flowViz.Area,
+                receiverFlat: flowViz.Receiver);
             Console.WriteLine(
-                $"  [history] {totalTime / 1000.0:F0} kyr: Ocean={Percentage(ocean):F1}% Lake={Percentage(lake):F1}% -> {Path.GetFileName(outPath)}");
+                $"  [history] {totalTime / 1000.0:F0} kyr: SeaLevel={seaLevel:F1}m Ocean={Percentage(ocean):F1}% Lake={Percentage(lake):F1}% -> {Path.GetFileName(outPath)}");
         }
     }
 
     Console.WriteLine("Simulation complete.");
+}
+
+// terrain画像とtilemap画像を横に並べて1枚のPNGに結合して保存する
+static void SaveSideBySidePng(string leftPath, string rightPath, string outPath)
+{
+    using var left = Image.Load<Rgb24>(leftPath);
+    using var right = Image.Load<Rgb24>(rightPath);
+    var w = left.Width + right.Width;
+    var h = Math.Max(left.Height, right.Height);
+    using var combined = new Image<Rgb24>(w, h, new Rgb24(20, 20, 20));
+    combined.Mutate(ctx =>
+    {
+        ctx.DrawImage(left, new SixLabors.ImageSharp.Point(0, 0), 1f);
+        ctx.DrawImage(right, new SixLabors.ImageSharp.Point(left.Width, 0), 1f);
+    });
+    combined.SaveAsPng(outPath);
 }
 
 static string CreateHistoryDir(string runName)
@@ -356,7 +439,7 @@ static double[,] ComputeHillshade(double[,] z, double dx,
     var hs = new double[nrows, ncols];
 
     // 光源ベクトル (matplotlib と同じ定義)
-    var az  = (360.0 - azdegDeg + 90.0) * Math.PI / 180.0; // 北→東→南→西
+    var az = (360.0 - azdegDeg + 90.0) * Math.PI / 180.0; // 北→東→南→西
     var alt = altdegDeg * Math.PI / 180.0;
     var lx = Math.Cos(alt) * Math.Cos(az);
     var ly = Math.Cos(alt) * Math.Sin(az);
@@ -367,14 +450,18 @@ static double[,] ComputeHillshade(double[,] z, double dx,
         for (var c = 0; c < ncols; c++)
         {
             // 中央差分で法線ベクトルを計算 (vert_exag を掛けた高さで)
-            var dzdx = r > 0 && r < nrows - 1
-                ? (z[r + 1, c] - z[r - 1, c]) * vertExag / (2.0 * dx)
+            // 配列インデックス: r=0が南端、r=nrows-1が北端 (origin='lower')
+            // dzdx_geo = 東西方向の勾配 (列 c 方向)
+            // dzdy_geo = 南北方向の勾配 (行 r 方向、r増加=北向きなので符号そのまま)
+            // 光源ベクトルは lx=東西成分, ly=南北成分 なので対応させる
+            var dzdx_geo = c > 0 && c < ncols - 1
+                ? (z[r, c + 1] - z[r, c - 1]) * vertExag / (2.0 * dx)   // 東向きが正
                 : 0.0;
-            var dzdy = c > 0 && c < ncols - 1
-                ? (z[r, c + 1] - z[r, c - 1]) * vertExag / (2.0 * dx)
+            var dzdy_geo = r > 0 && r < nrows - 1
+                ? (z[r + 1, c] - z[r - 1, c]) * vertExag / (2.0 * dx)   // 北向きが正
                 : 0.0;
             // 法線 n = (-dz/dx, -dz/dy, 1) を正規化
-            var nx = -dzdx; var ny = -dzdy; var nz = 1.0;
+            var nx = -dzdx_geo; var ny = -dzdy_geo; var nz = 1.0;
             var nlen = Math.Sqrt(nx * nx + ny * ny + nz * nz);
             nx /= nlen; ny /= nlen; nz /= nlen;
             // 輝度 = 内積, 0..1 にクランプ
@@ -395,6 +482,664 @@ static double OverlayBlend(double base_, double intensity)
         return 1.0 - 2.0 * (1.0 - base_) * (1.0 - intensity);
 }
 
+// ============================================================
+// タイルマップ描画
+// 分類ルール:
+//   Water : z <= seaLevel
+//   Sand  : seaLevel < z <= seaLevel+SandBand  AND  水辺に隣接(1セル以内)
+//   Soil  : soil_depth >= SoilThreshold
+//   Rock  : それ以外(薄い土+露頭岩盤)
+//   川    : SaveTerrainPng と同じ集水面積比例の円形ブラシで Water 色を上書き
+// ============================================================
+// タイル分類の山寄計算を共通化: seaLevel と z[,] から sandThreshold/rockThreshold を返す
+static (double sand, double rock) CalcTileThresholds(double[,] z, double seaLevel,
+    double sandPercentile = 20.0, double rockPercentile = 80.0)
+{
+    var nrows = z.GetLength(0); var ncols = z.GetLength(1);
+    var landElevs = new List<double>();
+    for (var r = 0; r < nrows; r++)
+        for (var c = 0; c < ncols; c++)
+            if (z[r, c] > seaLevel) landElevs.Add(z[r, c]);
+    var sand = landElevs.Count > 0 ? Percentile(landElevs, sandPercentile) : seaLevel + 1.0;
+    var rock = landElevs.Count > 0 ? Percentile(landElevs, rockPercentile) : seaLevel + 2.0;
+    return (sand, rock);
+}
+
+// 0=Water,1=Sand,2=Soil,3=Rock のタイル選择
+// 山寄基準: seaLevel以下=Water, sand以下=Sand, rock以下=Soil, それ以上=Rock
+static int ClassifyTile(double elevation, double seaLevel, double sandThreshold, double rockThreshold)
+    => elevation <= seaLevel ? 0
+     : elevation <= sandThreshold ? 1
+     : elevation <= rockThreshold ? 2
+     : 3;
+
+// マジョリティフィルター: 3×3ネイバーの多数決でタイルを滑らかにする (passes回実施)
+static int[,] MajorityFilter(int[,] src, int passes = 3)
+{
+    var nrows = src.GetLength(0); var ncols = src.GetLength(1);
+    var cur = (int[,])src.Clone();
+    var nxt = new int[nrows, ncols];
+    for (var p = 0; p < passes; p++)
+    {
+        for (var r = 0; r < nrows; r++)
+            for (var c = 0; c < ncols; c++)
+            {
+                var counts = new int[4];
+                for (var dr = -1; dr <= 1; dr++)
+                    for (var dc = -1; dc <= 1; dc++)
+                    {
+                        var rr = Math.Clamp(r + dr, 0, nrows - 1);
+                        var cc = Math.Clamp(c + dc, 0, ncols - 1);
+                        counts[cur[rr, cc]]++;
+                    }
+                // 最高数のタイルを選択。同数の場合は元の値を維持
+                var best = cur[r, c];
+                for (var t = 0; t < 4; t++) if (counts[t] > counts[best]) best = t;
+                nxt[r, c] = best;
+            }
+        (cur, nxt) = (nxt, cur);
+    }
+    return cur;
+}
+
+// 分離可能ガウシアンカーネルで float[,] を畳み込む
+static float[,] GaussianBlur2D(float[,] src, double sigma)
+{
+    var nrows = src.GetLength(0); var ncols = src.GetLength(1);
+    // カーネル半径 = ceil(3σ)
+    var radius = (int)Math.Ceiling(3.0 * sigma);
+    var ksize = 2 * radius + 1;
+    var kernel = new float[ksize];
+    double sum = 0.0;
+    for (var i = 0; i < ksize; i++)
+    {
+        var x = i - radius;
+        kernel[i] = (float)Math.Exp(-0.5 * x * x / (sigma * sigma));
+        sum += kernel[i];
+    }
+    for (var i = 0; i < ksize; i++) kernel[i] /= (float)sum;
+
+    // 水平方向
+    var tmp = new float[nrows, ncols];
+    for (var r = 0; r < nrows; r++)
+        for (var c = 0; c < ncols; c++)
+        {
+            float v = 0f;
+            for (var k = 0; k < ksize; k++)
+                v += kernel[k] * src[r, Math.Clamp(c + k - radius, 0, ncols - 1)];
+            tmp[r, c] = v;
+        }
+    // 垂直方向
+    var dst = new float[nrows, ncols];
+    for (var r = 0; r < nrows; r++)
+        for (var c = 0; c < ncols; c++)
+        {
+            float v = 0f;
+            for (var k = 0; k < ksize; k++)
+                v += kernel[k] * tmp[Math.Clamp(r + k - radius, 0, nrows - 1), c];
+            dst[r, c] = v;
+        }
+    return dst;
+}
+
+// 高解像度タイルマップ: 1000×1000 px
+// ワンホットベクトル化 → チャンネルごとガウシアンブラー → argmax で4色くっきり
+// sigma: ブラー強度 (セル単位)。大きいほど境界が丸くなる
+static void SaveHighResTileMapPng(
+    double[,] z,
+    double seaLevel,
+    string filePath,
+    int targetSize = 1000,
+    double smoothSigma = 1.5,
+    double sandPercentile = 20.0,
+    double rockPercentile = 80.0,
+    double[]? drainageAreaFlat = null,
+    int[]? receiverFlat = null)
+{
+    var nrows = z.GetLength(0);
+    var ncols = z.GetLength(1);
+
+    var dir = Path.GetDirectoryName(filePath);
+    if (!string.IsNullOrWhiteSpace(dir))
+        Directory.CreateDirectory(dir);
+
+    // --- タイル分類 (ネイティブ解像度 150×150) ---
+    var (sandThreshold, rockThreshold) = CalcTileThresholds(z, seaLevel, sandPercentile, rockPercentile);
+    var tile = new int[nrows, ncols];
+    for (var r = 0; r < nrows; r++)
+        for (var c = 0; c < ncols; c++)
+            tile[r, c] = ClassifyTile(z[r, c], seaLevel, sandThreshold, rockThreshold);
+
+    // --- ワンホットベクトル化: 4チャンネルの float[,] を作成 ---
+    // ch[t][r,c] = そのセルがタイル t なら 1.0f, それ以外 0.0f
+    const int NumTiles = 4;
+    var ch = new float[NumTiles][,];
+    for (var t = 0; t < NumTiles; t++)
+    {
+        ch[t] = new float[nrows, ncols];
+        for (var r = 0; r < nrows; r++)
+            for (var c = 0; c < ncols; c++)
+                ch[t][r, c] = tile[r, c] == t ? 1.0f : 0.0f;
+    }
+
+    // --- 各チャンネルにガウシアンブラーをかける ---
+    for (var t = 0; t < NumTiles; t++)
+        ch[t] = GaussianBlur2D(ch[t], smoothSigma);
+
+    // --- 出力画像を生成: 各出力ピクセルで argmax → 4色くっきり ---
+    // タイル色定義
+    // 0=Water (30,100,200)  1=Sand (210,190,130)  2=Soil (80,140,55)  3=Rock (150,145,140)
+    static (byte r, byte g, byte b) TileColorB(int t) => t switch
+    {
+        0 => (30, 100, 200),
+        1 => (210, 190, 130),
+        2 => (80, 140, 55),
+        _ => (150, 145, 140),
+    };
+
+    using var image = new Image<Rgb24>(targetSize, targetSize);
+    for (var py = 0; py < targetSize; py++)
+        for (var px = 0; px < targetSize; px++)
+        {
+            // 出力ピクセル → ネイティブグリッド上の浮動小数点位置
+            var tx = (px + 0.5) * ncols / targetSize - 0.5;   // 列方向 (0 = 西端)
+            var tyImg = (py + 0.5) * nrows / targetSize - 0.5; // 画像行 (0 = 上端)
+            var ty = (nrows - 1) - tyImg;                       // グリッド行 (0 = 南端)
+
+            // 双線形補間で各チャンネルの値を取得
+            var x0 = (int)Math.Floor(tx); var y0 = (int)Math.Floor(ty);
+            var fx = (float)(tx - x0); var fy = (float)(ty - y0);
+            int X(int v) => Math.Clamp(v, 0, ncols - 1);
+            int Y(int v) => Math.Clamp(v, 0, nrows - 1);
+
+            // argmax: 4チャンネルの補間値が最大のタイルを選ぶ
+            var best = 0; var bestVal = float.MinValue;
+            for (var t = 0; t < NumTiles; t++)
+            {
+                var v00 = ch[t][Y(y0), X(x0)];
+                var v10 = ch[t][Y(y0), X(x0 + 1)];
+                var v01 = ch[t][Y(y0 + 1), X(x0)];
+                var v11 = ch[t][Y(y0 + 1), X(x0 + 1)];
+                var val = v00 * (1 - fx) * (1 - fy)
+                        + v10 * fx * (1 - fy)
+                        + v01 * (1 - fx) * fy
+                        + v11 * fx * fy;
+                if (val > bestVal) { bestVal = val; best = t; }
+            }
+
+            var (cr, cg, cb) = TileColorB(best);
+            image[px, py] = new Rgb24(cr, cg, cb);
+        }
+
+    // --- 川レイヤー後処理: Gaussian+argmax後にピクセル直接描画 ---
+    // SaveTileMapPng と同じ最近傍線分アルゴリズムで川を上書き
+    // (川をGaussian前に混ぜると境界がにじんでチリジリになるため後処理が正解)
+    if (drainageAreaFlat is not null && receiverFlat is not null)
+    {
+        // --- 川の riverRadius 計算 (px単位: 1セル = targetSize/ncols px) ---
+        var cellPx = (double)targetSize / ncols; // 1セルあたりのピクセル数
+        var riverRadius = new double[nrows, ncols];
+        var posDrain = new List<double>();
+        for (var rr = 0; rr < nrows; rr++)
+            for (var cc = 0; cc < ncols; cc++)
+            {
+                if (z[rr, cc] <= seaLevel) continue;
+                var a = drainageAreaFlat[rr * ncols + cc];
+                if (a > 0.0) posDrain.Add(a);
+            }
+        if (posDrain.Count > 0)
+        {
+            var drThreshold = Percentile(posDrain, 80.0);
+            var logMin = Math.Log(1.0 + drThreshold);
+            var logMax = Math.Log(1.0 + posDrain.Max());
+            var logRange = Math.Max(logMax - logMin, 1e-12);
+            for (var rr = 0; rr < nrows; rr++)
+                for (var cc = 0; cc < ncols; cc++)
+                {
+                    if (z[rr, cc] <= seaLevel) continue;
+                    var a = drainageAreaFlat[rr * ncols + cc];
+                    if (a < drThreshold) continue;
+                    var norm = Math.Clamp((Math.Log(1.0 + a) - logMin) / logRange, 0.0, 1.0);
+                    riverRadius[rr, cc] = 1.2 * norm * cellPx; // px単位
+                }
+        }
+
+        // --- Catmull-Romスプライン化のための前処理: 各riverノードの「最良上流」を求める ---
+        // 上流ノードが複数ある場合は最大riverRadiusを持つものを採用（本流優先）
+        var bestUpstream = new int[nrows * ncols];
+        Array.Fill(bestUpstream, -1);
+        for (var rr = 0; rr < nrows; rr++)
+            for (var cc = 0; cc < ncols; cc++)
+            {
+                if (z[rr, cc] <= seaLevel || riverRadius[rr, cc] <= 0.0) continue;
+                var node = rr * ncols + cc;
+                var rec = receiverFlat[node];
+                if (rec == node) continue;
+                // このnodeはrecの上流候補: より大きなriverRadiusなら更新
+                var curBest = bestUpstream[rec];
+                if (curBest < 0 || riverRadius[rr, cc] > riverRadius[curBest / ncols, curBest % ncols])
+                    bestUpstream[rec] = node;
+            }
+
+        // --- Catmull-Romスプラインをサンプリングして微小線分列に変換 ---
+        // 各辺(node→rec)に対してP0(上流),P1(node),P2(rec),P3(下流)の4制御点を設定し
+        // t∈[0,1]を CatmullRomSubdiv 等分でサンプリングして短い直線セグメントに分解する
+        // → 既存の最近傍線分アルゴリズムでそのまま描画できる
+        const int CatmullRomSubdiv = 8; // 1辺あたりのサブ分割数（増やすほど滑らか）
+
+        // 画像座標変換ヘルパー（グリッド行インデックス→画像Y）
+        double GridToImgX(int c) => (c + 0.5) * cellPx;
+        double GridToImgY(int r) => (nrows - 1 - r + 0.5) * cellPx;
+
+        // Centripetal Catmull-Rom (alpha=0.5): Barry-Goldman法
+        // コード長^alpha で再パラメータ化するため、不均一間隔でもオーバーシュートしない
+        // t_in は P1→P2 区間内の正規化パラメータ (0..1)
+        static (double x, double y) CatmullRomCentripetal(
+            double p0x, double p0y, double p1x, double p1y,
+            double p2x, double p2y, double p3x, double p3y, double tNorm)
+        {
+            static double KnotDist(double ax, double ay, double bx, double by)
+            {
+                var dx = bx - ax; var dy = by - ay;
+                // alpha=0.5: sqrt(|d|) = |d|^0.5
+                return Math.Pow(dx * dx + dy * dy, 0.25); // sqrt(sqrt(dx²+dy²))
+            }
+            var t0 = 0.0;
+            var t1 = t0 + KnotDist(p0x, p0y, p1x, p1y);
+            var t2 = t1 + KnotDist(p1x, p1y, p2x, p2y);
+            var t3 = t2 + KnotDist(p2x, p2y, p3x, p3y);
+
+            // P1..P2 区間で t_in ∈ [0,1] → t ∈ [t1, t2]
+            var t = t1 + tNorm * (t2 - t1);
+
+            // 縮退ガード: 区間幅が極小なら線形補間
+            if (t2 - t1 < 1e-9) return (p1x + tNorm * (p2x - p1x), p1y + tNorm * (p2y - p1y));
+
+            static double Lerp(double a, double b, double ta, double tb, double tv)
+                => (Math.Abs(tb - ta) < 1e-12) ? a : a + (b - a) * (tv - ta) / (tb - ta);
+
+            var a1x = Lerp(p0x, p1x, t0, t1, t); var a1y = Lerp(p0y, p1y, t0, t1, t);
+            var a2x = Lerp(p1x, p2x, t1, t2, t); var a2y = Lerp(p1y, p2y, t1, t2, t);
+            var a3x = Lerp(p2x, p3x, t2, t3, t); var a3y = Lerp(p2y, p3y, t2, t3, t);
+            var b1x = Lerp(a1x, a2x, t0, t2, t); var b1y = Lerp(a1y, a2y, t0, t2, t);
+            var b2x = Lerp(a2x, a3x, t1, t3, t); var b2y = Lerp(a2y, a3y, t1, t3, t);
+            return (Lerp(b1x, b2x, t1, t2, t), Lerp(b1y, b2y, t1, t2, t));
+        }
+
+        var segments = new List<(double ax, double ay, double bx, double by, double radA, double radB)>();
+        for (var rr = 0; rr < nrows; rr++)
+            for (var cc = 0; cc < ncols; cc++)
+            {
+                var node = rr * ncols + cc;
+                var rec = receiverFlat[node];
+                if (rec == node) continue;
+                if (z[rr, cc] <= seaLevel) continue;
+                var recR = rec / ncols; var recC = rec % ncols;
+                var receiverIsOcean = z[recR, recC] <= seaLevel;
+                var radA = riverRadius[rr, cc];
+                var radB = receiverIsOcean ? radA : riverRadius[recR, recC];
+                if (Math.Max(radA, radB) < 1.0) continue;
+
+                // 短い支流フィルタ: bestUpstream を遡って MinRiverChainCells セル未満はスキップ
+                // 1セル ≈ cellPx px なので 4セル ≈ 26px 未満の支流を除去
+                const int MinRiverChainCells = 4;
+                {
+                    var walkNode = node;
+                    var chainLen = 0;
+                    while (chainLen < MinRiverChainCells)
+                    {
+                        chainLen++;
+                        var upCheck = bestUpstream[walkNode];
+                        if (upCheck < 0 || riverRadius[upCheck / ncols, upCheck % ncols] <= 0.0) break;
+                        walkNode = upCheck;
+                    }
+                    if (chainLen < MinRiverChainCells) continue;
+                }
+
+                // P1 = node, P2 = receiver
+                var p1x = GridToImgX(cc); var p1y = GridToImgY(rr);
+                var p2x = GridToImgX(recC); var p2y = GridToImgY(recR);
+
+                // P0 = P1の上流ノード（なければ P0=2*P1-P2 で外挿）
+                double p0x, p0y;
+                var up = bestUpstream[node];
+                if (up >= 0 && riverRadius[up / ncols, up % ncols] > 0.0)
+                {
+                    p0x = GridToImgX(up % ncols); p0y = GridToImgY(up / ncols);
+                }
+                else { p0x = 2 * p1x - p2x; p0y = 2 * p1y - p2y; }
+
+                // P3 = recの下流ノード（なければ P3=2*P2-P1 で外挿）
+                double p3x, p3y;
+                var rec2 = receiverFlat[rec];
+                var rec2R = rec2 / ncols; var rec2C = rec2 % ncols;
+                if (rec2 != rec && z[rec2R, rec2C] > seaLevel && riverRadius[rec2R, rec2C] > 0.0)
+                {
+                    p3x = GridToImgX(rec2C); p3y = GridToImgY(rec2R);
+                }
+                else { p3x = 2 * p2x - p1x; p3y = 2 * p2y - p1y; }
+
+                // Centripetal Catmull-Romをサブ分割して短い線分列に変換
+                var (prevX, prevY) = CatmullRomCentripetal(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, 0.0);
+                for (var si = 1; si <= CatmullRomSubdiv; si++)
+                {
+                    var t = si / (double)CatmullRomSubdiv;
+                    var (curX, curY) = CatmullRomCentripetal(p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, t);
+                    var tMid = (si - 0.5) / CatmullRomSubdiv;
+                    var interpRad = radA + tMid * (radB - radA);
+                    if (interpRad >= 1.0)
+                        segments.Add((prevX, prevY, curX, curY, interpRad, interpRad));
+                    (prevX, prevY) = (curX, curY);
+                }
+            }
+
+        // --- 空間バケット ---
+        var bucketPx = (int)Math.Max(1, cellPx * 2);
+        var bucketCols = (targetSize + bucketPx - 1) / bucketPx;
+        var bucketRows = (targetSize + bucketPx - 1) / bucketPx;
+        var buckets = new List<int>[bucketRows, bucketCols];
+        for (var br = 0; br < bucketRows; br++)
+            for (var bc = 0; bc < bucketCols; bc++)
+                buckets[br, bc] = [];
+        for (var si = 0; si < segments.Count; si++)
+        {
+            var (ax, ay, bx, by, radA, radB) = segments[si];
+            var maxRad = Math.Max(radA, radB);
+            var bx0 = (int)Math.Max(0, Math.Floor((Math.Min(ax, bx) - maxRad) / bucketPx));
+            var bx1 = (int)Math.Min(bucketCols - 1, Math.Floor((Math.Max(ax, bx) + maxRad) / bucketPx));
+            var by0 = (int)Math.Max(0, Math.Floor((Math.Min(ay, by) - maxRad) / bucketPx));
+            var by1 = (int)Math.Min(bucketRows - 1, Math.Floor((Math.Max(ay, by) + maxRad) / bucketPx));
+            for (var br = by0; br <= by1; br++)
+                for (var bc = bx0; bc <= bx1; bc++)
+                    buckets[br, bc].Add(si);
+        }
+
+        // --- ピクセルごとに最近傍線分距離判定 ---
+        var (wr, wg, wb) = TileColorB(0);
+        for (var py = 0; py < targetSize; py++)
+            for (var px = 0; px < targetSize; px++)
+            {
+                var bRow = py / bucketPx; var bCol = px / bucketPx;
+                var insideRiver = false;
+                for (var dbr = -1; dbr <= 1 && !insideRiver; dbr++)
+                    for (var dbc = -1; dbc <= 1 && !insideRiver; dbc++)
+                    {
+                        var nbr = bRow + dbr; var nbc = bCol + dbc;
+                        if (nbr < 0 || nbr >= bucketRows || nbc < 0 || nbc >= bucketCols) continue;
+                        foreach (var si in buckets[nbr, nbc])
+                        {
+                            var (ax, ay, bx, by, radA, radB) = segments[si];
+                            var abx = bx - ax; var aby = by - ay;
+                            var ab2 = abx * abx + aby * aby;
+                            double tParam; double dist2;
+                            if (ab2 < 1e-12)
+                            {
+                                var ddx = px - ax; var ddy = py - ay;
+                                dist2 = ddx * ddx + ddy * ddy; tParam = 0.0;
+                            }
+                            else
+                            {
+                                tParam = Math.Clamp(((px - ax) * abx + (py - ay) * aby) / ab2, 0.0, 1.0);
+                                var qx = ax + tParam * abx - px;
+                                var qy = ay + tParam * aby - py;
+                                dist2 = qx * qx + qy * qy;
+                            }
+                            var interpRad = radA + tParam * (radB - radA);
+                            if (interpRad < 1.0) continue;
+                            if (dist2 <= interpRad * interpRad) { insideRiver = true; break; }
+                        }
+                    }
+                if (insideRiver)
+                    image[px, py] = new Rgb24(wr, wg, wb);
+            }
+    }
+
+    image.SaveAsPng(filePath);
+}
+
+static void SaveTileMapPng(
+    double[,] z,
+    double[,] soil,
+    double[,] bedrock,
+    double seaLevel,
+    string filePath,
+    double[]? drainageAreaFlat = null,
+    int[]? receiverFlat = null)
+{
+    const int Scale = 4;
+    // タイル分類は陸上セルの標高パーセンタイルで決める
+    const double SandPercentile = 20.0;
+    const double RockPercentile = 80.0;
+
+    var nrows = z.GetLength(0);
+    var ncols = z.GetLength(1);
+
+    var dir = Path.GetDirectoryName(filePath);
+    if (!string.IsNullOrWhiteSpace(dir))
+        Directory.CreateDirectory(dir);
+
+    // --- 陸上セルの標高パーセンタイルを計算 ---
+    var (sandThreshold, rockThreshold) = CalcTileThresholds(z, seaLevel, SandPercentile, RockPercentile);
+
+    // --- 川: 集水面積を対数正規化して各セルの riverRadius を計算 ---
+    // （SaveTerrainPng と同じロジック）
+    var riverRadius = new double[nrows, ncols]; // 0 = 川なし
+    if (drainageAreaFlat is not null)
+    {
+        var posDrain = new List<double>();
+        for (var r = 0; r < nrows; r++)
+            for (var c = 0; c < ncols; c++)
+            {
+                if (z[r, c] <= seaLevel) continue;
+                var a = drainageAreaFlat[r * ncols + c];
+                if (a > 0.0) posDrain.Add(a);
+            }
+        if (posDrain.Count > 0)
+        {
+            var threshold = Percentile(posDrain, 80.0);
+            var logMin = Math.Log(1.0 + threshold);
+            var logMax = Math.Log(1.0 + posDrain.Max());
+            var logRange = Math.Max(logMax - logMin, 1e-12);
+            for (var r = 0; r < nrows; r++)
+                for (var c = 0; c < ncols; c++)
+                {
+                    if (z[r, c] <= seaLevel) continue;
+                    var a = drainageAreaFlat[r * ncols + c];
+                    if (a < threshold) continue;
+                    var norm = Math.Clamp((Math.Log(1.0 + a) - logMin) / logRange, 0.0, 1.0);
+                    riverRadius[r, c] = 1.2 * norm * Scale;
+                }
+        }
+    }
+
+    // --- 各セルのタイル種別を決定 (川はベース描画後に上書き) ---
+    // 0=Water, 1=Sand, 2=Soil, 3=Rock
+    var tile = new int[nrows, ncols];
+    for (var r = 0; r < nrows; r++)
+        for (var c = 0; c < ncols; c++)
+            tile[r, c] = ClassifyTile(z[r, c], seaLevel, sandThreshold, rockThreshold);
+
+    // --- タイル色定義 ---
+    // Water: 深めの青  ( 30, 100, 200)
+    // Sand : 砂色      (210, 190, 130)
+    // Soil : 草緑      ( 80, 140,  55)
+    // Rock : グレー    (150, 145, 140)
+    static (byte R, byte G, byte B) TileColor(int t) => t switch
+    {
+        0 => (30, 100, 200),
+        1 => (210, 190, 130),
+        2 => (80, 140, 55),
+        _ => (150, 145, 140),
+    };
+
+    // --- ベースレイヤー描画 ---
+    using var image = new Image<Rgb24>(ncols * Scale, nrows * Scale);
+    for (var r = 0; r < nrows; r++)
+    {
+        var imgRow = nrows - 1 - r; // origin='lower'
+        for (var c = 0; c < ncols; c++)
+        {
+            var (cr, cg, cb) = TileColor(tile[r, c]);
+            for (var dy = 0; dy < Scale; dy++)
+                for (var dx2 = 0; dx2 < Scale; dx2++)
+                    image[c * Scale + dx2, imgRow * Scale + dy] = new Rgb24(cr, cg, cb);
+        }
+    }
+
+    // --- 川レイヤー: 最近傍線分距離によるラスタライズ ---
+    // アルゴリズム:
+    //   1. 有効な川セグメント (node→receiver) を全てリストアップし、
+    //      空間バケット（セルサイズ = BucketPx）に登録する
+    //   2. 各ピクセルの周辺バケットだけを検索して最近傍線分を求める
+    //   3. そのピクセルから最近傍線分への距離 ≤ 線分上の補間半径 なら川と判定
+    //   → D8の8方向パターンが繰り返し見える問題を解消する
+    var (wr, wg, wb) = TileColor(0); // Water 色
+    if (receiverFlat is not null)
+    {
+        var imgW = ncols * Scale;
+        var imgH = nrows * Scale;
+
+        // --- ステップ1: 川セグメントをリストアップ ---
+        // 各要素: (ax, ay, bx, by, radA, radB)
+        //   A = 上流ノードの画像座標, B = 下流ノードの画像座標
+        //   radA/radB = それぞれのノードの川幅半径（ピクセル）
+        var segments = new List<(double ax, double ay, double bx, double by, double radA, double radB)>();
+        for (var r = 0; r < nrows; r++)
+            for (var c = 0; c < ncols; c++)
+            {
+                var node = r * ncols + c;
+                var rec = receiverFlat[node];
+                if (rec == node) continue;
+                if (z[r, c] <= seaLevel) continue;
+
+                var recR = rec / ncols;
+                var recC = rec % ncols;
+                var receiverIsOcean = z[recR, recC] <= seaLevel;
+
+                var radA = riverRadius[r, c];
+                // receiver が海の場合は上流端と同じ幅のまま接続（先細りにしない）
+                var radB = receiverIsOcean ? radA : riverRadius[recR, recC];
+                if (radA <= 0.0 && radB <= 0.0) continue;
+
+                // 少なくとも一端が1px以上の場合のみ登録
+                if (Math.Max(radA, radB) < 1.0) continue;
+
+                double ax = c * Scale + Scale * 0.5;
+                double ay = (nrows - 1 - r) * Scale + Scale * 0.5;
+                double bx = recC * Scale + Scale * 0.5;
+                double by = (nrows - 1 - recR) * Scale + Scale * 0.5;
+                segments.Add((ax, ay, bx, by, radA, radB));
+            }
+
+        // --- ステップ2: 空間バケットに登録 ---
+        // バケットサイズ = Scale*2 px（格子間距離の半分程度）
+        const int BucketPx = Scale * 2;
+        var bucketCols = (imgW + BucketPx - 1) / BucketPx;
+        var bucketRows = (imgH + BucketPx - 1) / BucketPx;
+        // 各バケットが持つセグメントの index リスト
+        var buckets = new List<int>[bucketRows, bucketCols];
+        for (var br = 0; br < bucketRows; br++)
+            for (var bc = 0; bc < bucketCols; bc++)
+                buckets[br, bc] = [];
+
+        for (var si = 0; si < segments.Count; si++)
+        {
+            var (ax, ay, bx, by, radA, radB) = segments[si];
+            var maxRad = Math.Max(radA, radB);
+            // このセグメントが影響しうるバケット範囲を登録
+            var bx0 = (int)Math.Max(0, Math.Floor((Math.Min(ax, bx) - maxRad) / BucketPx));
+            var bx1 = (int)Math.Min(bucketCols - 1, Math.Floor((Math.Max(ax, bx) + maxRad) / BucketPx));
+            var by0 = (int)Math.Max(0, Math.Floor((Math.Min(ay, by) - maxRad) / BucketPx));
+            var by1 = (int)Math.Min(bucketRows - 1, Math.Floor((Math.Max(ay, by) + maxRad) / BucketPx));
+            for (var br = by0; br <= by1; br++)
+                for (var bc = bx0; bc <= bx1; bc++)
+                    buckets[br, bc].Add(si);
+        }
+
+        // --- ステップ3: ピクセルごとに最近傍線分を検索して塗る ---
+        // 斜め方向セグメントがバケット境界をまたぐ場合に見落とさないよう
+        // ピクセルのバケットとその3×3近傍 (最大9バケット) を検索する
+        for (var py = 0; py < imgH; py++)
+            for (var px = 0; px < imgW; px++)
+            {
+                var bRow = py / BucketPx;
+                var bCol = px / BucketPx;
+
+                // このピクセルのバケット内の全線分に対して距離判定
+                var insideRiver = false;
+                for (var dbr = -1; dbr <= 1 && !insideRiver; dbr++)
+                    for (var dbc = -1; dbc <= 1 && !insideRiver; dbc++)
+                    {
+                        var nbr = bRow + dbr; var nbc = bCol + dbc;
+                        if (nbr < 0 || nbr >= bucketRows || nbc < 0 || nbc >= bucketCols) continue;
+                        foreach (var si in buckets[nbr, nbc])
+                        {
+                            var (ax, ay, bx, by, radA, radB) = segments[si];
+                            var abx = bx - ax;
+                            var aby = by - ay;
+                            var ab2 = abx * abx + aby * aby;
+
+                            double tParam;
+                            double dist2;
+                            if (ab2 < 1e-12)
+                            {
+                                // 点セグメント
+                                var ddx = px - ax; var ddy = py - ay;
+                                dist2 = ddx * ddx + ddy * ddy;
+                                tParam = 0.0;
+                            }
+                            else
+                            {
+                                tParam = Math.Clamp(((px - ax) * abx + (py - ay) * aby) / ab2, 0.0, 1.0);
+                                var qx = ax + tParam * abx - px;
+                                var qy = ay + tParam * aby - py;
+                                dist2 = qx * qx + qy * qy;
+                            }
+
+                            // 最近傍点での幅を線形補間 (A→B で radA→radB)
+                            var interpRad = radA + tParam * (radB - radA);
+                            if (interpRad < 1.0) continue; // 補間後も細すぎる部分はスキップ
+
+                            if (dist2 <= interpRad * interpRad)
+                            {
+                                insideRiver = true;
+                                break;
+                            }
+                        }
+                    } // end 3x3 bucket loop
+
+                if (insideRiver)
+                    image[px, py] = new Rgb24(wr, wg, wb);
+            }
+    }
+    else
+    {
+        // フォールバック: 旧来の円形ブラシ
+        for (var r = 0; r < nrows; r++)
+            for (var c = 0; c < ncols; c++)
+            {
+                var rad = riverRadius[r, c];
+                if (rad <= 0.0) continue;
+                var imgRow = nrows - 1 - r;
+                var cx = c * Scale + Scale / 2;
+                var cy = imgRow * Scale + Scale / 2;
+                var iRad = (int)Math.Ceiling(rad);
+                for (var dy = -iRad; dy <= iRad; dy++)
+                    for (var dx2 = -iRad; dx2 <= iRad; dx2++)
+                    {
+                        if (dy * dy + dx2 * dx2 > rad * rad) continue;
+                        var px2 = cx + dx2;
+                        var py2 = cy + dy;
+                        if (px2 < 0 || px2 >= ncols * Scale) continue;
+                        if (py2 < 0 || py2 >= nrows * Scale) continue;
+                        image[px2, py2] = new Rgb24(wr, wg, wb);
+                    }
+            }
+    }
+
+    image.SaveAsPng(filePath);
+}
+
 static void SaveTerrainPng(
     double[,] z,
     double seaLevel,
@@ -402,6 +1147,8 @@ static void SaveTerrainPng(
     bool includeOceanLakeOverlay,
     double[]? drainageAreaFlat = null)
 {
+    const int Scale = 4; // 1セル → Scale×Scale ピクセル
+
     var nrows = z.GetLength(0);
     var ncols = z.GetLength(1);
 
@@ -425,14 +1172,14 @@ static void SaveTerrainPng(
 
     // --- ocean / lake マスク ---
     var oceanMask = new bool[nrows, ncols];
-    var lakeMask  = new bool[nrows, ncols];
+    var lakeMask = new bool[nrows, ncols];
     if (includeOceanLakeOverlay)
         (oceanMask, lakeMask) = ClassifyOcean(z, seaLevel);
 
-    // --- 川しきい値 ---
-    var riverLevel1 = double.PositiveInfinity;
-    var riverLevel2 = double.PositiveInfinity;
-    var riverLevel3 = double.PositiveInfinity;
+    // --- 川: 集水面積を対数正規化し各セルの「川半径」を算出 ---
+    // 陸上の集水面積上位20%のセルのみ川として描画
+    // 川の半径 (ピクセル単位) = 0.5 + 2.0 * norm  (norm: 0-1)
+    var riverRadius = new double[nrows, ncols]; // 0 = 川なし
     if (drainageAreaFlat is not null && drainageAreaFlat.Length == nrows * ncols)
     {
         var posDrain = new List<double>();
@@ -445,76 +1192,107 @@ static void SaveTerrainPng(
             }
         if (posDrain.Count > 0)
         {
-            riverLevel1 = Percentile(posDrain, 80.0);
-            riverLevel2 = Percentile(posDrain, 90.0);
-            riverLevel3 = Percentile(posDrain, 95.0);
+            var threshold = Percentile(posDrain, 80.0);
+            var logMin = Math.Log(1.0 + threshold);
+            var logMax = Math.Log(1.0 + posDrain.Max());
+            var logRange = Math.Max(logMax - logMin, 1e-12);
+
+            for (var rr = 0; rr < nrows; rr++)
+                for (var cc = 0; cc < ncols; cc++)
+                {
+                    if (z[rr, cc] <= seaLevel) continue;
+                    var a = drainageAreaFlat[rr * ncols + cc];
+                    if (a < threshold) continue;
+                    var norm = Math.Clamp((Math.Log(1.0 + a) - logMin) / logRange, 0.0, 1.0);
+                    // Scale=4 のとき 0〜2.0 ピクセル半径 → 本流は直径 8px 相当
+                    riverRadius[rr, cc] = 2.0 * norm * Scale;
+                }
         }
     }
 
-    using var image = new Image<Rgb24>(ncols, nrows);
+    // --- ベースレイヤー (1セル=1ピクセルで描画してからスケールアップ) ---
+    using var image = new Image<Rgb24>(ncols * Scale, nrows * Scale);
 
-    for (var rr = nrows - 1; rr >= 0; rr--)
+    for (var rr = 0; rr < nrows; rr++)
     {
         for (var c = 0; c < ncols; c++)
         {
-            // 画像の行: origin='lower' に合わせて上下反転
-            var imgRow = nrows - 1 - rr;
+            var imgRow = nrows - 1 - rr; // origin='lower' で上下反転
             var hs = hillshade[rr, c];
 
             byte pr, pg, pb;
 
             if (includeOceanLakeOverlay && oceanMask[rr, c])
             {
-                // 海: dodgerblue ベースにヒルシェード
-                var d = 0.3 + 0.7 * hs; // 暗くしすぎない
-                pr = (byte)(30  * d);
+                var d = 0.3 + 0.7 * hs;
+                pr = (byte)(30 * d);
                 pg = (byte)(144 * d);
                 pb = (byte)(255 * d);
             }
             else if (includeOceanLakeOverlay && lakeMask[rr, c])
             {
-                // 湖: tomato
                 var d = 0.3 + 0.7 * hs;
                 pr = (byte)(255 * d);
-                pg = (byte)(99  * d);
-                pb = (byte)(71  * d);
+                pg = (byte)(99 * d);
+                pb = (byte)(71 * d);
             }
             else
             {
-                // 陸: terrain カラーマップ + overlay hillshade
                 var t = (z[rr, c] - zMin) / zSpan;
                 var (tr, tg, tb) = TerrainColormap(t);
-
-                // overlay blend per channel
                 var br2 = tr / 255.0;
                 var bg2 = tg / 255.0;
                 var bb2 = tb / 255.0;
-                var blendR = OverlayBlend(br2, hs);
-                var blendG = OverlayBlend(bg2, hs);
-                var blendB = OverlayBlend(bb2, hs);
-                pr = (byte)(Math.Clamp(blendR, 0.0, 1.0) * 255);
-                pg = (byte)(Math.Clamp(blendG, 0.0, 1.0) * 255);
-                pb = (byte)(Math.Clamp(blendB, 0.0, 1.0) * 255);
-
-                // 川オーバーレイ (シアン, 半透明風)
-                if (drainageAreaFlat is not null && z[rr, c] > seaLevel)
-                {
-                    var a = drainageAreaFlat[rr * ncols + c];
-                    double alpha = 0.0;
-                    (byte cr, byte cg, byte cb) riverCol = (0, 120, 255);
-                    if (a >= riverLevel3)      { alpha = 0.75; riverCol = (0, 120, 255); }
-                    else if (a >= riverLevel2) { alpha = 0.65; riverCol = (40, 170, 255); }
-                    else if (a >= riverLevel1) { alpha = 0.50; riverCol = (90, 210, 255); }
-                    if (alpha > 0.0)
-                    {
-                        pr = (byte)(pr * (1 - alpha) + riverCol.cr * alpha);
-                        pg = (byte)(pg * (1 - alpha) + riverCol.cg * alpha);
-                        pb = (byte)(pb * (1 - alpha) + riverCol.cb * alpha);
-                    }
-                }
+                pr = (byte)(Math.Clamp(OverlayBlend(br2, hs), 0.0, 1.0) * 255);
+                pg = (byte)(Math.Clamp(OverlayBlend(bg2, hs), 0.0, 1.0) * 255);
+                pb = (byte)(Math.Clamp(OverlayBlend(bb2, hs), 0.0, 1.0) * 255);
             }
 
-            image[c, imgRow] = new Rgb24(pr, pg, pb);
+            // Scale×Scale ブロックに書き込む
+            for (var dy = 0; dy < Scale; dy++)
+                for (var dx2 = 0; dx2 < Scale; dx2++)
+                    image[c * Scale + dx2, imgRow * Scale + dy] = new Rgb24(pr, pg, pb);
+        }
+    }
+
+    // --- 川レイヤー: 集水面積に応じた太さで円形ブラシ描画 ---
+    // 色: Blues カラーマップ相当 (norm 0→薄水色, 1→濃紺)
+    for (var rr = 0; rr < nrows; rr++)
+    {
+        for (var cc = 0; cc < ncols; cc++)
+        {
+            var rad = riverRadius[rr, cc];
+            if (rad <= 0.0) continue;
+
+            var norm = Math.Clamp((rad / Scale) / 2.0, 0.0, 1.0);
+
+            // Blues カラーマップ: (0.35+0.65*norm) をR/G/Bに手動近似
+            // 薄: (198, 219, 239) → 濃: (8, 48, 107)
+            var cr = (byte)(198 + (8 - 198) * norm);
+            var cg = (byte)(219 + (48 - 219) * norm);
+            var cb = (byte)(239 + (107 - 239) * norm);
+            const double alpha = 0.75;
+
+            var imgRow = nrows - 1 - rr;
+            var cx = cc * Scale + Scale / 2;
+            var cy = imgRow * Scale + Scale / 2;
+            var iRad = (int)Math.Ceiling(rad);
+
+            for (var dy = -iRad; dy <= iRad; dy++)
+                for (var dx2 = -iRad; dx2 <= iRad; dx2++)
+                {
+                    if (dy * dy + dx2 * dx2 > rad * rad) continue;
+                    var px2 = cx + dx2;
+                    var py2 = cy + dy;
+                    if (px2 < 0 || px2 >= ncols * Scale) continue;
+                    if (py2 < 0 || py2 >= nrows * Scale) continue;
+                    var existing = image[px2, py2];
+                    image[px2, py2] = new Rgb24(
+                        (byte)(existing.R * (1 - alpha) + cr * alpha),
+                        (byte)(existing.G * (1 - alpha) + cg * alpha),
+                        (byte)(existing.B * (1 - alpha) + cb * alpha)
+                    );
+                }
         }
     }
 
@@ -941,6 +1719,73 @@ static void SetBoundaryToZero(double[,] z)
         z[r, 0] = 0.0;
         z[r, ncols - 1] = 0.0;
     }
+}
+
+// ===== 実験的: 海岸侵食 =====
+// seaLevel ± CoastalBeltWidth の標高帯にある陸セルの岩盤を侵食する
+// 波の打ち上げ・打ち下げで海岸線付近が削られるシンプルなモデル
+// erosionRate [m/yr] × dt [yr] だけ bedrock を下げる
+static void ApplyCoastalErosion(
+    double[,] bedrock, double[,] soil,
+    double seaLevel, double beltWidth, double erosionRate, int dt)
+{
+    var nrows = bedrock.GetLength(0);
+    var ncols = bedrock.GetLength(1);
+    var erosionAmount = erosionRate * dt;
+    for (var r = 1; r < nrows - 1; r++)
+    {
+        for (var c = 1; c < ncols - 1; c++)
+        {
+            var elev = bedrock[r, c] + soil[r, c];
+            // 海面より上、かつ海面から beltWidth 以内のセルを海岸帯とみなす
+            if (elev <= seaLevel) continue;
+            if (elev > seaLevel + beltWidth) continue;
+
+            // 海岸帯内での相対位置: 0=sea level, 1=belt top → 海面に近いほど強く侵食
+            var relPos = (elev - seaLevel) / beltWidth; // 0..1
+            var factor = 1.0 - relPos; // 海面に近い=1.0、帯上端=0.0
+            var cut = erosionAmount * factor;
+
+            // 土層から先に削り、足りなければ岩盤を削る
+            var soilCut = Math.Min(soil[r, c], cut);
+            soil[r, c] -= soilCut;
+            var remaining = cut - soilCut;
+            if (remaining > 0.0)
+                bedrock[r, c] -= remaining;
+        }
+    }
+}
+
+// 境界セルを内険セルの地表標高 (bedrock+soil) の下位percentile%に設定する
+// seaLevel=0 以下には追従させない（海の底に潜らない）
+static double SetBoundaryToInlandPercentile(double[,] bedrock, double[,] soil, double percentile)
+{
+    var nrows = bedrock.GetLength(0);
+    var ncols = bedrock.GetLength(1);
+
+    // 内険セル (=境界以外) の地表標高を収集
+    var inlandZ = new List<double>((nrows - 2) * (ncols - 2));
+    for (var r = 1; r < nrows - 1; r++)
+        for (var c = 1; c < ncols - 1; c++)
+            inlandZ.Add(bedrock[r, c] + Math.Max(soil[r, c], 0.0));
+
+    if (inlandZ.Count == 0) return 0.0;
+
+    var target = Percentile(inlandZ, percentile);
+    // 少なくとも0以上（海水面以下には追従しない）
+    target = Math.Max(target, 0.0);
+
+    for (var c = 0; c < ncols; c++)
+    {
+        bedrock[0, c] = target;
+        bedrock[nrows - 1, c] = target;
+    }
+    for (var r = 1; r < nrows - 1; r++)
+    {
+        bedrock[r, 0] = target;
+        bedrock[r, ncols - 1] = target;
+    }
+    return target;
 }
 
 static void AddUniformUplift(double[,] z, double delta)

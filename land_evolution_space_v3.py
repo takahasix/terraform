@@ -37,6 +37,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
 from matplotlib.colors import LightSource, ListedColormap
+from matplotlib.collections import LineCollection
 from noise import pnoise2
 from landlab import RasterModelGrid
 from landlab.components import (
@@ -151,7 +152,7 @@ def save_history_frame(z_2d, sea_level, out_path, title, particle_xy=None, drain
     sea_mask_simple = z_2d <= sea_level
 
     ls = LightSource(azdeg=315, altdeg=45)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(28, 12))
 
     def _draw_terrain(ax):
         rgb = ls.shade(z_2d, cmap=plt.get_cmap('terrain'), vert_exag=2, blend_mode='overlay')
@@ -164,13 +165,48 @@ def save_history_frame(z_2d, sea_level, out_path, title, particle_xy=None, drain
             land_drain[sea_mask_simple] = 0
             positive = land_drain[land_drain > 0]
             if len(positive) > 0:
-                lvls = [np.percentile(positive, p) for p in [80, 90, 95]]
-                ax.contour(
-                    drainage, levels=lvls,
-                    colors=['cyan', 'deepskyblue', 'blue'],
-                    linewidths=[0.5, 0.5, 0.5],
-                    origin='lower',
-                )
+                # 集水面積に基づいて太さが変わる川の描画
+                # 閾値: 上位20%の面積を持つセルのみ川として描く
+                threshold = np.percentile(positive, 80)
+                river_mask = land_drain >= threshold
+
+                nrows_d, ncols_d = land_drain.shape
+                # 対数スケールで集水面積を 0-1 に正規化
+                log_drain = np.log1p(land_drain)
+                log_min = np.log1p(threshold)
+                log_max = np.log1p(land_drain.max())
+                log_range = log_max - log_min if log_max > log_min else 1.0
+                norm_drain = np.clip((log_drain - log_min) / log_range, 0.0, 1.0)
+
+                # 各ピクセルを水平・垂直セグメントとして LineCollection に積む
+                segments = []
+                widths = []
+                colors_list = []
+                # 青のカラーマップ（薄い水色 → 濃い青）
+                river_cmap = plt.get_cmap('Blues')
+                ys, xs = np.where(river_mask)
+                for y, x in zip(ys, xs):
+                    n = norm_drain[y, x]
+                    # 横方向セグメント（隣接するセルと結ぶ）
+                    if x + 1 < ncols_d and river_mask[y, x + 1]:
+                        segments.append([(x, y), (x + 1, y)])
+                        widths.append(0.4 + 3.5 * n)
+                        colors_list.append(river_cmap(0.35 + 0.65 * n))
+                    # 縦方向セグメント
+                    if y + 1 < nrows_d and river_mask[y + 1, x]:
+                        segments.append([(x, y), (x, y + 1)])
+                        widths.append(0.4 + 3.5 * n)
+                        colors_list.append(river_cmap(0.35 + 0.65 * n))
+
+                if segments:
+                    lc = LineCollection(
+                        segments,
+                        linewidths=widths,
+                        colors=colors_list,
+                        alpha=0.75,
+                        zorder=3,
+                    )
+                    ax.add_collection(lc)
         if particle_xy is not None:
             px, py = particle_xy
             sample = min(len(px), 800)
@@ -205,7 +241,7 @@ def save_history_frame(z_2d, sea_level, out_path, title, particle_xy=None, drain
     )
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
+    fig.savefig(out_path, dpi=480)
     plt.close(fig)
 
 
@@ -750,14 +786,36 @@ def visualize_space_results(results, output_file="space_result.png"):
     ax.imshow(rgb, origin='lower')
     ax.imshow(sea_mask, cmap='Blues', alpha=0.4, origin='lower')
     
-    # Rivers
+    # Rivers（集水面積で太さが変わる可変幅描画）
     land_drainage = drainage.copy()
     land_drainage[sea_mask] = 0
-    if np.any(land_drainage > 0):
-        levels = [np.percentile(land_drainage[land_drainage > 0], p) for p in [80, 90, 95]]
-        ax.contour(drainage, levels=levels, colors=['cyan', 'blue', 'darkblue'],
-                   linewidths=[0.5, 0.5, 0.5], origin='lower')
-    
+    positive_d = land_drainage[land_drainage > 0]
+    if len(positive_d) > 0:
+        threshold_d = np.percentile(positive_d, 80)
+        river_mask_d = land_drainage >= threshold_d
+        nrows_d, ncols_d = land_drainage.shape
+        log_drain_d = np.log1p(land_drainage)
+        log_min_d = np.log1p(threshold_d)
+        log_max_d = np.log1p(land_drainage.max())
+        log_range_d = log_max_d - log_min_d if log_max_d > log_min_d else 1.0
+        norm_drain_d = np.clip((log_drain_d - log_min_d) / log_range_d, 0.0, 1.0)
+        river_cmap_d = plt.get_cmap('Blues')
+        segments_d, widths_d, colors_d = [], [], []
+        ys_d, xs_d = np.where(river_mask_d)
+        for y, x in zip(ys_d, xs_d):
+            n = norm_drain_d[y, x]
+            if x + 1 < ncols_d and river_mask_d[y, x + 1]:
+                segments_d.append([(x, y), (x + 1, y)])
+                widths_d.append(0.4 + 3.5 * n)
+                colors_d.append(river_cmap_d(0.35 + 0.65 * n))
+            if y + 1 < nrows_d and river_mask_d[y + 1, x]:
+                segments_d.append([(x, y), (x, y + 1)])
+                widths_d.append(0.4 + 3.5 * n)
+                colors_d.append(river_cmap_d(0.35 + 0.65 * n))
+        if segments_d:
+            ax.add_collection(LineCollection(segments_d, linewidths=widths_d,
+                                             colors=colors_d, alpha=0.75, zorder=3))
+
     ax.contour(z_final, levels=[sea_level], colors='yellow', linewidths=2, origin='lower')
     ax.set_title('Terrain + Rivers + Coastline')
     ax.axis('off')
@@ -800,7 +858,7 @@ def visualize_space_results(results, output_file="space_result.png"):
     
     plt.tight_layout()
     save_path = resolve_output_path(output_file)
-    plt.savefig(save_path, dpi=150)
+    plt.savefig(save_path, dpi=600)
     print(f"\nSaved: {save_path}")
     
     return fig
@@ -842,7 +900,7 @@ def visualize_sediment_evolution(snapshots, sea_level=0.0, output_file="space_se
     
     plt.tight_layout(rect=(0, 0, 0.9, 1))
     save_path = resolve_output_path(output_file)
-    plt.savefig(save_path, dpi=150)
+    plt.savefig(save_path, dpi=600)
     print(f"Saved: {save_path}")
     
     return fig
@@ -936,7 +994,7 @@ def compare_with_without_deposition():
     plt.suptitle('SPACE: Effect of Fine Fraction (F_f)\nTop: Deposition ON | Bottom: Deposition OFF', fontsize=14)
     plt.tight_layout()
     comparison_path = resolve_output_path("space_comparison.png")
-    plt.savefig(comparison_path, dpi=150)
+    plt.savefig(comparison_path, dpi=600)
     print(f"\nSaved: {comparison_path}")
     
     return results_dep, results_nodep
