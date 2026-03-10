@@ -163,3 +163,6 @@ archive/temp/*.csv
 # C# / .NET build outputs
 **/bin/
 **/obj/
+
+.DS_Store
+**/.DS_Store
